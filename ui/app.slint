@@ -1,0 +1,607 @@
+import { HorizontalBox, LineEdit, ScrollView, TextEdit, VerticalBox } from "std-widgets.slint";
+
+component PillButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: 96px;
+    height: 40px;
+    border-radius: 20px;
+    background: !enabled ? #f2f4f8 : selected ? #0057ff : #ffffff;
+    border-width: 1px;
+    border-color: selected ? #0057ff : #d8e0ea;
+    opacity: enabled ? 1 : 0.55;
+    Text { text: root.label; color: !root.enabled ? #94a3b8 : root.selected ? #ffffff : #334155; font-size: 14px; font-weight: 700; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+component MiniPillButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> selected: false;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: 60px;
+    height: 34px;
+    border-radius: 17px;
+    background: !enabled ? #f2f4f8 : selected ? #0057ff : #ffffff;
+    border-width: 1px;
+    border-color: selected ? #0057ff : #d8e0ea;
+    opacity: enabled ? 1 : 0.55;
+    Text { text: root.label; color: !root.enabled ? #94a3b8 : root.selected ? #ffffff : #334155; font-size: 12px; font-weight: 700; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+component SecondaryButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked;
+    min-width: 116px;
+    height: 42px;
+    border-radius: 16px;
+    background: enabled ? #ffffff : #f4f7fb;
+    border-width: 1px;
+    border-color: enabled ? #d8e0ea : #e2e8f0;
+    Text { text: root.label; color: enabled ? #334155 : #94a3b8; font-size: 13px; font-weight: 600; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+component PrimaryButton inherits Rectangle {
+    in property <string> label;
+    in property <bool> enabled: true;
+    callback clicked;
+    height: 58px;
+    border-radius: 20px;
+    background: enabled ? #0057ff : #eef3fb;
+    border-width: 1px;
+    border-color: enabled ? #0057ff : #dbe4f0;
+    Text { text: root.label; color: enabled ? #ffffff : #8a99ad; font-size: 16px; font-weight: 700; x: (parent.width - self.width) / 2; y: (parent.height - self.height) / 2; }
+    touch := TouchArea { enabled: root.enabled; clicked => { root.clicked(); } }
+}
+
+component StatusChip inherits Rectangle {
+    in property <string> text;
+    in property <int> tone: 0;
+    height: 36px;
+    border-radius: 18px;
+    background: tone == 1 ? #fff4dd : tone == 2 ? #e7f8ef : tone == 3 ? #ffe8e8 : #eef3f8;
+    Text { text: root.text; color: tone == 1 ? #b97316 : tone == 2 ? #148a5d : tone == 3 ? #cf3b3b : #334155; font-size: 12px; font-weight: 700; x: 14px; y: (parent.height - self.height) / 2; }
+}
+
+component SectionCard inherits Rectangle {
+    background: #ffffff;
+    border-width: 0px;
+    border-color: #e3e9f1;
+    border-radius: 28px;
+}
+
+export component AppWindow inherits Window {
+    in-out property <string> window_title: "PillowLock";
+    in-out property <string> app_title;
+    in-out property <string> app_subtitle;
+    in-out property <string> mode_group_title;
+    in-out property <string> mode_group_subtitle;
+    in-out property <string> mode_group_hint;
+    in-out property <string> profile_group_title;
+    in-out property <string> profile_group_subtitle;
+    in-out property <string> profile_group_hint;
+    in-out property <string> encrypt_label;
+    in-out property <string> decrypt_label;
+    in-out property <string> balanced_label;
+    in-out property <string> hardened_label;
+    in-out property <string> english_label;
+    in-out property <string> korean_label;
+    in-out property <string> advanced_label;
+    in-out property <string> queue_panel_label;
+    in-out property <string> recursive_label;
+    in-out property <bool> encrypt_mode: true;
+    in-out property <bool> hardened_profile: false;
+    in-out property <bool> english_language: true;
+    in-out property <bool> show_advanced: false;
+    in-out property <bool> show_settings: false;
+    in-out property <bool> show_queue: false;
+    in-out property <bool> running: false;
+    in-out property <bool> can_run: false;
+    in-out property <bool> show_confirm_password: true;
+    in-out property <bool> has_keyfile: false;
+    in-out property <bool> has_new_keyfile: false;
+    in-out property <bool> has_input_file: false;
+    in-out property <bool> drop_hovered: false;
+    in-out property <bool> queue_recursive: false;
+    in-out property <bool> queue_has_items: false;
+    in-out property <bool> can_queue_add: false;
+    in-out property <bool> can_queue_run: false;
+    in-out property <bool> can_queue_remove: false;
+    in-out property <bool> can_queue_retry: false;
+    in-out property <bool> can_stop_queue: false;
+    in-out property <bool> can_reopen_last_file: false;
+    in-out property <bool> can_use_last_output_folder: false;
+    in-out property <bool> can_repeat_last_setup: false;
+    in-out property <bool> can_open_result: false;
+    in-out property <bool> can_copy_result: false;
+    in-out property <bool> can_inspect: false;
+    in-out property <bool> can_verify: false;
+    in-out property <bool> can_rotate: false;
+    in-out property <bool> can_check_updates: false;
+    in-out property <bool> can_install_update: false;
+    in-out property <bool> can_open_release: false;
+    in-out property <int> status_tone: 0;
+    in-out property <int> selected_queue_index: -1;
+    in-out property <string> status_text;
+    in-out property <string> status_detail;
+    in-out property <string> workspace_title;
+    in-out property <string> workspace_subtitle;
+    in-out property <string> source_surface_title;
+    in-out property <string> source_surface_subtitle;
+    in-out property <string> input_field_label;
+    in-out property <string> input_path;
+    in-out property <string> browse_input_label;
+    in-out property <string> output_field_label;
+    in-out property <string> output_placeholder;
+    in-out property <string> output_path;
+    in-out property <string> suggest_output_label;
+    in-out property <string> browse_output_label;
+    in-out property <string> keyfile_title;
+    in-out property <string> keyfile_subtitle;
+    in-out property <string> keyfile_field_label;
+    in-out property <string> keyfile_placeholder;
+    in-out property <string> keyfile_path;
+    in-out property <string> browse_keyfile_label;
+    in-out property <string> create_keyfile_label;
+    in-out property <string> clear_keyfile_label;
+    in-out property <string> password_title;
+    in-out property <string> password_subtitle;
+    in-out property <string> password_field_label;
+    in-out property <string> password_placeholder;
+    in-out property <string> password;
+    in-out property <string> confirm_password_field_label;
+    in-out property <string> confirm_password_placeholder;
+    in-out property <string> confirm_password;
+    in-out property <string> recent_title;
+    in-out property <string> recent_subtitle;
+    in-out property <string> recent_inputs_title;
+    in-out property <string> recent_inputs_text;
+    in-out property <string> recent_outputs_title;
+    in-out property <string> recent_outputs_text;
+    in-out property <string> recent_jobs_title;
+    in-out property <string> recent_jobs_text;
+    in-out property <string> quick_repeat_label;
+    in-out property <string> quick_reopen_label;
+    in-out property <string> quick_output_folder_label;
+    in-out property <string> action_title;
+    in-out property <string> action_subtitle;
+    in-out property <string> action_label;
+    in-out property <string> action_caption;
+    in-out property <string> reset_label;
+    in-out property <string> open_result_label;
+    in-out property <string> copy_result_label;
+    in-out property <string> queue_current_label;
+    in-out property <string> queue_title;
+    in-out property <string> queue_subtitle;
+    in-out property <string> queue_summary;
+    in-out property <string> queue_empty_text;
+    in-out property <[string]> queue_items;
+    in-out property <string> add_current_queue_label;
+    in-out property <string> add_folder_label;
+    in-out property <string> remove_selected_queue_label;
+    in-out property <string> run_queue_label;
+    in-out property <string> stop_queue_label;
+    in-out property <string> retry_failed_queue_label;
+    in-out property <string> clear_finished_queue_label;
+    in-out property <string> advanced_title;
+    in-out property <string> advanced_subtitle;
+    in-out property <string> selection_card_title;
+    in-out property <string> security_card_title;
+    in-out property <string> activity_card_title;
+    in-out property <string> tool_card_title;
+    in-out property <string> selection_details;
+    in-out property <string> security_details;
+    in-out property <string> activity_details;
+    in-out property <string> inspect_label;
+    in-out property <string> verify_label;
+    in-out property <string> rotate_label;
+    in-out property <string> advanced_output_title;
+    in-out property <string> advanced_tool_output;
+    in-out property <string> rotate_password_label;
+    in-out property <string> rotate_password_placeholder;
+    in-out property <string> rotate_password;
+    in-out property <string> rotate_confirm_label;
+    in-out property <string> rotate_confirm_placeholder;
+    in-out property <string> rotate_confirm_password;
+    in-out property <string> rotate_keyfile_label;
+    in-out property <string> rotate_keyfile_placeholder;
+    in-out property <string> rotate_keyfile_path;
+    in-out property <string> browse_new_keyfile_label;
+    in-out property <string> clear_new_keyfile_label;
+    in-out property <string> update_card_title;
+    in-out property <string> update_card_subtitle;
+    in-out property <string> current_version_title;
+    in-out property <string> current_version_text;
+    in-out property <string> update_status_title;
+    in-out property <string> update_status_text;
+    in-out property <string> update_details_title;
+    in-out property <string> update_details_text;
+    in-out property <string> check_updates_label;
+    in-out property <string> install_update_label;
+    in-out property <string> open_release_label;
+    in-out property <string> settings_button_label;
+    in-out property <string> settings_title;
+    in-out property <string> settings_subtitle;
+    in-out property <string> settings_close_label;
+    in-out property <string> settings_language_title;
+    in-out property <string> settings_language_subtitle;
+    in-out property <string> settings_panels_title;
+    in-out property <string> settings_panels_subtitle;
+    in-out property <string> tools_title;
+    in-out property <string> tools_subtitle;
+    in-out property <string> tools_close_label;
+
+    callback browse_input(); callback browse_output(); callback suggest_output(); callback browse_keyfile();
+    callback create_keyfile(); callback clear_keyfile(); callback browse_new_keyfile(); callback clear_new_keyfile();
+    callback run_job(); callback clear_form(); callback select_mode_encrypt(); callback select_mode_decrypt();
+    callback select_profile_balanced(); callback select_profile_hardened(); callback select_language_english();
+    callback select_language_korean(); callback toggle_advanced(); callback toggle_queue(); callback toggle_queue_recursive();
+    callback form_edited(); callback queue_current(); callback add_folder(); callback remove_queue_item(); callback run_queue();
+    callback cancel_queue(); callback retry_failed_jobs(); callback clear_finished_queue(); callback select_queue_item(int);
+    callback quick_repeat_last_setup(); callback quick_reopen_last_file(); callback quick_use_last_output_folder();
+    callback open_output_folder(); callback copy_output_path(); callback inspect_vault(); callback verify_vault(); callback rotate_keys();
+    callback check_for_updates(); callback install_update(); callback open_release_page();
+    callback toggle_settings();
+
+    title: window_title;
+    icon: @image-url("../assets/branding/logo.png");
+    width: 1400px;
+    height: 980px;
+    background: #f4f7fb;
+    default-font-family: "Segoe UI";
+    default-font-size: 14px;
+
+    VerticalBox {
+        spacing: 0px;
+        Rectangle {
+            height: header-content.preferred-height + 24px; background: #ffffff; border-width: 1px; border-color: #e7edf5;
+            header-content := VerticalBox {
+                padding-left: 28px; padding-right: 28px; padding-top: 26px; padding-bottom: 24px; spacing: 18px;
+                HorizontalBox {
+                    min-height: 52px; spacing: 16px;
+                    Image { width: 44px; height: 44px; source: @image-url("../assets/branding/logo.png"); image-fit: contain; }
+                    VerticalBox {
+                        spacing: 2px;
+                        Text { text: root.app_title; color: #18212f; font-size: 28px; font-weight: 700; }
+                        Text { text: root.app_subtitle; color: #6b7280; font-size: 12px; }
+                    }
+                    Rectangle { horizontal-stretch: 1; background: transparent; }
+                    HorizontalBox {
+                        spacing: 10px;
+                        SecondaryButton { label: root.settings_button_label; enabled: true; min-width: 132px; clicked => { root.toggle_settings(); } }
+                    }
+                }
+                HorizontalBox {
+                    spacing: 14px;
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: #f7faff;
+                        border-width: 0px;
+                        border-color: #e1e8f3;
+                        border-radius: 22px;
+                        VerticalBox {
+                            padding: 18px; spacing: 10px;
+                            Text { text: root.mode_group_title; color: #18212f; font-size: 14px; font-weight: 700; }
+                            Text { text: root.mode_group_subtitle; color: #64748b; font-size: 12px; wrap: word-wrap; }
+                            HorizontalBox {
+                                spacing: 10px;
+                                PillButton { label: root.encrypt_label; selected: root.encrypt_mode; enabled: !root.running && !root.can_stop_queue; horizontal-stretch: 1; clicked => { root.select_mode_encrypt(); } }
+                                PillButton { label: root.decrypt_label; selected: !root.encrypt_mode; enabled: !root.running && !root.can_stop_queue; horizontal-stretch: 1; clicked => { root.select_mode_decrypt(); } }
+                            }
+                            Text { text: root.mode_group_hint; color: #316aff; font-size: 12px; wrap: word-wrap; }
+                        }
+                    }
+                    Rectangle {
+                        horizontal-stretch: 1;
+                        background: #f7faff;
+                        border-width: 0px;
+                        border-color: #e1e8f3;
+                        border-radius: 22px;
+                        VerticalBox {
+                            padding: 18px; spacing: 10px;
+                            Text { text: root.profile_group_title; color: #18212f; font-size: 14px; font-weight: 700; }
+                            Text { text: root.profile_group_subtitle; color: #64748b; font-size: 12px; wrap: word-wrap; }
+                            HorizontalBox {
+                                spacing: 10px;
+                                PillButton { label: root.balanced_label; selected: !root.hardened_profile; enabled: !root.running && !root.can_stop_queue; horizontal-stretch: 1; clicked => { root.select_profile_balanced(); } }
+                                PillButton { label: root.hardened_label; selected: root.hardened_profile; enabled: !root.running && !root.can_stop_queue; horizontal-stretch: 1; clicked => { root.select_profile_hardened(); } }
+                            }
+                            Text { text: root.profile_group_hint; color: #316aff; font-size: 12px; wrap: word-wrap; }
+                        }
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            vertical-stretch: 1; background: transparent;
+            scroller := ScrollView {
+                enabled: !root.show_settings;
+                width: parent.width; height: parent.height; viewport-width: content.width; viewport-height: content.height;
+                horizontal-scrollbar-policy: always-off; vertical-scrollbar-policy: as-needed; mouse-drag-pan-enabled: !root.show_settings;
+                content := Rectangle {
+                    width: max(scroller.visible-width - 32px, 700px);
+                    x: max((scroller.visible-width - self.width) / 2, 0px);
+                    background: transparent;
+                    height: form.preferred-height + 32px;
+                    form := VerticalBox {
+                        spacing: 20px; padding-top: 36px; padding-bottom: 32px;
+                        Text { text: root.workspace_title; color: #18212f; font-size: 36px; font-weight: 700; }
+                        Text { text: root.workspace_subtitle; color: #6b7280; font-size: 14px; wrap: word-wrap; }
+
+                        SectionCard {
+                            VerticalBox {
+                                padding: 24px; spacing: 16px;
+                                Text { text: root.recent_title; color: #18212f; font-size: 18px; font-weight: 700; }
+                                Text { text: root.recent_subtitle; color: #6b7280; font-size: 12px; wrap: word-wrap; }
+                                HorizontalBox {
+                                    spacing: 14px;
+                                    for card[index] in [root.recent_inputs_title, root.recent_outputs_title, root.recent_jobs_title] : Rectangle {
+                                        horizontal-stretch: 1; background: #f8fbff; border-width: 0px; border-color: #e3e9f1; border-radius: 20px;
+                                        VerticalBox {
+                                            padding: 18px; spacing: 8px;
+                                            Text { text: card; color: #18212f; font-size: 13px; font-weight: 700; }
+                                            Text { text: index == 0 ? root.recent_inputs_text : index == 1 ? root.recent_outputs_text : root.recent_jobs_text; color: #64748b; font-size: 12px; wrap: word-wrap; }
+                                        }
+                                    }
+                                }
+                                HorizontalBox {
+                                    spacing: 10px;
+                                    SecondaryButton { label: root.quick_repeat_label; enabled: root.can_repeat_last_setup; clicked => { root.quick_repeat_last_setup(); } }
+                                    SecondaryButton { label: root.quick_reopen_label; enabled: root.can_reopen_last_file; clicked => { root.quick_reopen_last_file(); } }
+                                    SecondaryButton { label: root.quick_output_folder_label; enabled: root.can_use_last_output_folder; clicked => { root.quick_use_last_output_folder(); } }
+                                }
+                            }
+                        }
+
+                        SectionCard {
+                            VerticalBox {
+                                padding: 24px; spacing: 16px;
+                                Text { text: root.input_field_label; color: #18212f; font-size: 18px; font-weight: 700; }
+                                Text { text: root.source_surface_subtitle; color: #6b7280; font-size: 12px; }
+                                Rectangle {
+                                    background: root.drop_hovered ? #e4efff : root.input_path == "" ? #f6f8fc : #ebf2ff;
+                                    border-width: 1px; border-color: root.drop_hovered ? #316aff : root.input_path == "" ? #dce5ef : #b8cbfb; border-radius: 24px; height: 156px;
+                                    VerticalBox {
+                                        padding: 18px; spacing: 10px;
+                                        Text { text: root.source_surface_title; color: #18212f; font-size: 20px; font-weight: 700; }
+                                        Text { text: root.input_path == "" ? root.source_surface_subtitle : root.input_path; color: #475569; font-size: 13px; wrap: word-wrap; }
+                                        SecondaryButton { label: root.browse_input_label; enabled: !root.running && !root.can_stop_queue; clicked => { root.browse_input(); } }
+                                    }
+                                }
+                                Text { text: root.output_field_label; color: #334155; font-size: 12px; font-weight: 600; }
+                                HorizontalBox {
+                                    spacing: 10px;
+                                    LineEdit { text <=> root.output_path; placeholder-text: root.output_placeholder; enabled: root.has_input_file && !root.running && !root.can_stop_queue; horizontal-stretch: 1; edited => { root.form_edited(); } }
+                                    SecondaryButton { label: root.suggest_output_label; enabled: root.has_input_file && !root.running && !root.can_stop_queue; clicked => { root.suggest_output(); } }
+                                    SecondaryButton { label: root.browse_output_label; enabled: root.has_input_file && !root.running && !root.can_stop_queue; clicked => { root.browse_output(); } }
+                                }
+                            }
+                        }
+
+                        SectionCard {
+                            VerticalBox {
+                                padding: 24px; spacing: 14px;
+                                Text { text: root.keyfile_title; color: #18212f; font-size: 18px; font-weight: 700; }
+                                Text { text: root.keyfile_subtitle; color: #6b7280; font-size: 12px; }
+                                Text { text: root.keyfile_field_label; color: #334155; font-size: 12px; font-weight: 600; }
+                                HorizontalBox {
+                                    spacing: 10px;
+                                    LineEdit { text <=> root.keyfile_path; placeholder-text: root.keyfile_placeholder; enabled: root.has_input_file && !root.running && !root.can_stop_queue; horizontal-stretch: 1; edited => { root.form_edited(); } }
+                                    SecondaryButton { label: root.browse_keyfile_label; enabled: root.has_input_file && !root.running && !root.can_stop_queue; clicked => { root.browse_keyfile(); } }
+                                    if root.encrypt_mode : SecondaryButton { label: root.create_keyfile_label; enabled: root.has_input_file && !root.running && !root.can_stop_queue; clicked => { root.create_keyfile(); } }
+                                    if root.has_keyfile : SecondaryButton { label: root.clear_keyfile_label; enabled: root.has_input_file && !root.running && !root.can_stop_queue; clicked => { root.clear_keyfile(); } }
+                                }
+                            }
+                        }
+
+                        SectionCard {
+                            VerticalBox {
+                                padding: 24px; spacing: 14px;
+                                Text { text: root.password_title; color: #18212f; font-size: 18px; font-weight: 700; }
+                                Text { text: root.password_subtitle; color: #6b7280; font-size: 12px; }
+                                Text { text: root.password_field_label; color: #334155; font-size: 12px; font-weight: 600; }
+                                LineEdit { text <=> root.password; placeholder-text: root.password_placeholder; enabled: root.has_input_file && !root.running && !root.can_stop_queue; input-type: InputType.password; edited => { root.form_edited(); } }
+                                if root.show_confirm_password : VerticalBox {
+                                    spacing: 12px;
+                                    Text { text: root.confirm_password_field_label; color: #334155; font-size: 12px; font-weight: 600; }
+                                    LineEdit { text <=> root.confirm_password; placeholder-text: root.confirm_password_placeholder; enabled: root.has_input_file && !root.running && !root.can_stop_queue; input-type: InputType.password; edited => { root.form_edited(); } }
+                                }
+                            }
+                        }
+
+                        SectionCard {
+                            VerticalBox {
+                                padding: 24px; spacing: 14px;
+                                Text { text: root.action_title; color: #18212f; font-size: 18px; font-weight: 700; }
+                                Text { text: root.action_subtitle; color: #6b7280; font-size: 12px; }
+                                PrimaryButton { horizontal-stretch: 1; label: root.action_label; enabled: root.can_run; clicked => { root.run_job(); } }
+                                Text { text: root.action_caption; color: #475569; font-size: 12px; wrap: word-wrap; }
+                                HorizontalBox {
+                                    spacing: 10px;
+                                    SecondaryButton { label: root.reset_label; enabled: !root.running && !root.can_stop_queue; clicked => { root.clear_form(); } }
+                                    SecondaryButton { label: root.open_result_label; enabled: root.can_open_result; clicked => { root.open_output_folder(); } }
+                                    SecondaryButton { label: root.copy_result_label; enabled: root.can_copy_result; clicked => { root.copy_output_path(); } }
+                                    SecondaryButton { label: root.queue_current_label; enabled: root.can_queue_add; clicked => { root.queue_current(); } }
+                                }
+                            }
+                        }
+
+                        if root.show_queue || root.queue_has_items : SectionCard {
+                            VerticalBox {
+                                padding: 24px; spacing: 14px;
+                                Text { text: root.queue_title; color: #18212f; font-size: 18px; font-weight: 700; }
+                                Text { text: root.queue_subtitle; color: #6b7280; font-size: 12px; wrap: word-wrap; }
+                                HorizontalBox {
+                                    spacing: 10px;
+                                    SecondaryButton { label: root.add_current_queue_label; enabled: root.can_queue_add; clicked => { root.queue_current(); } }
+                                    SecondaryButton { label: root.add_folder_label; enabled: !root.running && !root.can_stop_queue; clicked => { root.add_folder(); } }
+                                    MiniPillButton { label: root.recursive_label; selected: root.queue_recursive; enabled: !root.running && !root.can_stop_queue; clicked => { root.toggle_queue_recursive(); } }
+                                    SecondaryButton { label: root.remove_selected_queue_label; enabled: root.can_queue_remove; clicked => { root.remove_queue_item(); } }
+                                }
+                                HorizontalBox {
+                                    spacing: 10px;
+                                    SecondaryButton { label: root.run_queue_label; enabled: root.can_queue_run; clicked => { root.run_queue(); } }
+                                    SecondaryButton { label: root.stop_queue_label; enabled: root.can_stop_queue; clicked => { root.cancel_queue(); } }
+                                    SecondaryButton { label: root.retry_failed_queue_label; enabled: root.can_queue_retry; clicked => { root.retry_failed_jobs(); } }
+                                    SecondaryButton { label: root.clear_finished_queue_label; enabled: root.queue_has_items && !root.can_stop_queue; clicked => { root.clear_finished_queue(); } }
+                                }
+                                Rectangle {
+                                    background: #f8fbff; border-width: 1px; border-color: #e3e9f1; border-radius: 20px;
+                                    VerticalBox {
+                                        padding: 18px; spacing: 8px;
+                                        Text { text: root.queue_summary; color: #334155; font-size: 13px; font-weight: 700; wrap: word-wrap; }
+                                        if root.queue_has_items : VerticalBox {
+                                            spacing: 8px;
+                                            for item[index] in root.queue_items : Rectangle {
+                                                height: 54px; background: index == root.selected_queue_index ? #e8f0ff : #ffffff; border-width: 1px; border-color: index == root.selected_queue_index ? #bfd3ff : #dbe5f0; border-radius: 16px;
+                                                Text { text: item; color: #334155; font-size: 12px; x: 16px; y: (parent.height - self.height) / 2; width: parent.width - 32px; wrap: word-wrap; }
+                                                touch := TouchArea { clicked => { root.select_queue_item(index); } }
+                                            }
+                                        }
+                                        if !root.queue_has_items : Text { text: root.queue_empty_text; color: #64748b; font-size: 12px; wrap: word-wrap; }
+                                    }
+                                }
+                            }
+                        }
+
+                    }
+                }
+            }
+        }
+
+        Rectangle {
+            height: 62px;
+            background: #ffffff;
+            border-width: 1px;
+            border-color: #e7edf5;
+            HorizontalBox {
+                padding-left: 24px;
+                padding-right: 24px;
+                padding-top: 10px;
+                padding-bottom: 10px;
+                spacing: 12px;
+                StatusChip { text: root.status_text; tone: root.status_tone; }
+                Text { text: root.status_detail; color: #64748b; font-size: 12px; vertical-alignment: center; horizontal-stretch: 1; }
+            }
+        }
+    }
+
+    if root.show_settings : Rectangle {
+        x: 0px;
+        y: 0px;
+        width: parent.width;
+        height: parent.height;
+        background: #0f172a44;
+
+        backdrop-touch := TouchArea {
+            clicked => { root.toggle_settings(); }
+        }
+
+        panel := SectionCard {
+            width: min(parent.width - 48px, 760px);
+            height: min(settings-column.preferred-height + 56px, parent.height - 72px);
+            x: (parent.width - self.width) / 2;
+            y: 36px;
+            background: #ffffff;
+
+            panel-touch := TouchArea { width: parent.width; height: parent.height; }
+
+            settings-scroll := ScrollView {
+                width: parent.width;
+                height: parent.height;
+                horizontal-scrollbar-policy: always-off;
+                vertical-scrollbar-policy: as-needed;
+                viewport-width: settings-content.width;
+                viewport-height: settings-content.height;
+
+                settings-content := Rectangle {
+                    width: settings-scroll.visible-width;
+                    height: settings-column.preferred-height + 40px;
+                    background: transparent;
+
+                    settings-column := VerticalBox {
+                        padding: 28px;
+                        spacing: 18px;
+
+                        HorizontalBox {
+                            spacing: 16px;
+                            VerticalBox {
+                                spacing: 4px;
+                                Text { text: root.settings_title; color: #18212f; font-size: 24px; font-weight: 700; }
+                                Text { text: root.settings_subtitle; color: #6b7280; font-size: 12px; wrap: word-wrap; }
+                            }
+                            Rectangle { horizontal-stretch: 1; background: transparent; }
+                            SecondaryButton { label: root.settings_close_label; enabled: true; min-width: 96px; clicked => { root.toggle_settings(); } }
+                        }
+
+                        Rectangle {
+                            background: #f8fbff;
+                            border-width: 1px;
+                            border-color: #e3e9f1;
+                            border-radius: 20px;
+                            VerticalBox {
+                                padding: 20px;
+                                spacing: 12px;
+                                Text { text: root.settings_language_title; color: #18212f; font-size: 16px; font-weight: 700; }
+                                Text { text: root.settings_language_subtitle; color: #6b7280; font-size: 12px; wrap: word-wrap; }
+                                HorizontalBox {
+                                    spacing: 10px;
+                                    MiniPillButton { label: root.english_label; selected: root.english_language; enabled: !root.running && !root.can_stop_queue; clicked => { root.select_language_english(); } }
+                                    MiniPillButton { label: root.korean_label; selected: !root.english_language; enabled: !root.running && !root.can_stop_queue; clicked => { root.select_language_korean(); } }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            background: #f8fbff;
+                            border-width: 1px;
+                            border-color: #e3e9f1;
+                            border-radius: 20px;
+                            VerticalBox {
+                                padding: 20px;
+                                spacing: 12px;
+                                Text { text: root.settings_panels_title; color: #18212f; font-size: 16px; font-weight: 700; }
+                                Text { text: root.settings_panels_subtitle; color: #6b7280; font-size: 12px; wrap: word-wrap; }
+                                HorizontalBox {
+                                    spacing: 10px;
+                                    PillButton { label: root.queue_panel_label; selected: root.show_queue; enabled: !root.running; clicked => { root.toggle_queue(); } }
+                                }
+                            }
+                        }
+
+                        Rectangle {
+                            background: #f8fbff;
+                            border-width: 1px;
+                            border-color: #e3e9f1;
+                            border-radius: 20px;
+                            VerticalBox {
+                                padding: 20px;
+                                spacing: 12px;
+                                Text { text: root.update_card_title; color: #18212f; font-size: 16px; font-weight: 700; }
+                                Text { text: root.update_card_subtitle; color: #6b7280; font-size: 12px; wrap: word-wrap; }
+                                HorizontalBox {
+                                    spacing: 10px;
+                                    SecondaryButton { label: root.check_updates_label; enabled: root.can_check_updates; clicked => { root.check_for_updates(); } }
+                                    SecondaryButton { label: root.install_update_label; enabled: root.can_install_update; clicked => { root.install_update(); } }
+                                    SecondaryButton { label: root.open_release_label; enabled: root.can_open_release; clicked => { root.open_release_page(); } }
+                                }
+                                Text { text: root.current_version_title; color: #334155; font-size: 12px; font-weight: 600; }
+                                Text { text: root.current_version_text; color: #475569; font-size: 13px; wrap: word-wrap; }
+                                Text { text: root.update_status_title; color: #334155; font-size: 12px; font-weight: 600; }
+                                Text { text: root.update_status_text; color: #18212f; font-size: 13px; font-weight: 700; wrap: word-wrap; }
+                                Text { text: root.update_details_title; color: #334155; font-size: 12px; font-weight: 600; }
+                                TextEdit { text: root.update_details_text; read-only: true; wrap: word-wrap; }
+                            }
+                        }
+                    }
+                }
+            }
+        }
+    }
+}

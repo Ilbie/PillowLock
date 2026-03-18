@@ -1,0 +1,23 @@
+/target/
+/target-release-*/
+/dist/
+/.local-rust/
+/.tools/
+/.tmp-test/
+
+# Editor and OS noise
+/.idea/
+/.vscode/
+.DS_Store
+Thumbs.db
+
+# Generated binaries and installers
+*.exe
+*.msi
+*.pdb
+
+# Logs and temp files
+*.log
+*.tmp
+*.temp
+*.cache

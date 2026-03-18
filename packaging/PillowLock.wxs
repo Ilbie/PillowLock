@@ -1,0 +1,57 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix xmlns="http://wixtoolset.org/schemas/v4/wxs">
+  <Package
+    Name="PillowLock"
+    Manufacturer="PillowLock"
+    Version="$(var.AppVersion)"
+    UpgradeCode="2EF7A24C-9497-4DD3-BD94-1283DB5F6C6C"
+    Language="1033"
+    Scope="perMachine">
+    <SummaryInformation
+      Description="PillowLock"
+      Manufacturer="PillowLock" />
+
+    <MajorUpgrade DowngradeErrorMessage="A newer version of [ProductName] is already installed." />
+    <MediaTemplate EmbedCab="yes" />
+    <Icon Id="AppIcon" SourceFile="$(var.RepoRoot)\assets\branding\logo.ico" />
+    <Property Id="ARPPRODUCTICON" Value="AppIcon" />
+
+    <StandardDirectory Id="ProgramFiles64Folder">
+      <Directory Id="INSTALLFOLDER" Name="PillowLock">
+        <Component Id="MainExecutableComponent" Guid="*" Bitness="always64">
+          <File
+            Id="MainExecutableFile"
+            Source="$(var.BuildOutputDir)\pillowlock.exe"
+            KeyPath="yes" />
+        </Component>
+        <Component Id="FileIconComponent" Guid="*" Bitness="always64">
+          <File
+            Id="VaultFileIcon"
+            Source="$(var.RepoRoot)\assets\branding\logo.ico"
+            Name="pillowlock.ico"
+            KeyPath="yes" />
+        </Component>
+        <Component Id="FileAssociationComponent" Guid="*" Bitness="always64">
+          <RegistryKey Root="HKLM" Key="Software\Classes\.plock">
+            <RegistryValue Type="string" Value="PillowLock.Vault" KeyPath="yes" />
+          </RegistryKey>
+          <RegistryKey Root="HKLM" Key="Software\Classes\PillowLock.Vault">
+            <RegistryValue Type="string" Value="PillowLock Vault File" />
+            <RegistryKey Key="DefaultIcon">
+              <RegistryValue Type="string" Value="[#VaultFileIcon]" />
+            </RegistryKey>
+            <RegistryKey Key="shell\open\command">
+              <RegistryValue Type="string" Value="&quot;[#MainExecutableFile]&quot; &quot;%1&quot;" />
+            </RegistryKey>
+          </RegistryKey>
+        </Component>
+      </Directory>
+    </StandardDirectory>
+
+    <Feature Id="MainFeature" Title="PillowLock" Level="1">
+      <ComponentRef Id="MainExecutableComponent" />
+      <ComponentRef Id="FileIconComponent" />
+      <ComponentRef Id="FileAssociationComponent" />
+    </Feature>
+  </Package>
+</Wix>

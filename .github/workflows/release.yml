@@ -1,0 +1,95 @@
+name: Release
+
+on:
+  push:
+    tags:
+      - "v*"
+
+permissions:
+  contents: write
+
+jobs:
+  windows-release:
+    runs-on: windows-latest
+    env:
+      CARGO_TERM_COLOR: always
+      PILLOWLOCK_UPDATE_REPO: ${{ github.repository }}
+    steps:
+      - name: Check out repository
+        uses: actions/checkout@v4
+
+      - name: Install Rust toolchain
+        uses: dtolnay/rust-toolchain@stable
+
+      - name: Install .NET SDK
+        uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 8.0.x
+
+      - name: Validate release version
+        shell: pwsh
+        run: |
+          $cargoVersion = (Select-String -Path Cargo.toml -Pattern '^version\s*=\s*"([^"]+)"$' | Select-Object -First 1).Matches[0].Groups[1].Value
+          if (-not $cargoVersion) {
+            throw "Could not determine the package version from Cargo.toml."
+          }
+          $tagVersion = "${env:GITHUB_REF_NAME}".TrimStart("v")
+          if ($cargoVersion -ne $tagVersion) {
+            throw "Cargo.toml version '$cargoVersion' does not match tag '$tagVersion'."
+          }
+          "APP_VERSION=$cargoVersion" | Out-File -FilePath $env:GITHUB_ENV -Encoding utf8 -Append
+
+      - name: Build release executable
+        run: cargo build --release --locked
+
+      - name: Install WiX CLI
+        run: dotnet tool install --tool-path .tools wix
+
+      - name: Package MSI and EXE
+        shell: pwsh
+        run: |
+          $repoRoot = (Resolve-Path .).Path
+          $buildOutputDir = Join-Path $repoRoot 'target\release'
+          New-Item -ItemType Directory -Force -Path dist | Out-Null
+          .tools\wix.exe build `
+            packaging\PillowLock.wxs `
+            -arch x64 `
+            -d "AppVersion=$env:APP_VERSION" `
+            -d "RepoRoot=$repoRoot" `
+            -d "BuildOutputDir=$buildOutputDir" `
+            -o "dist\PillowLock-$env:APP_VERSION-x64.msi"
+          Copy-Item "target\release\pillowlock.exe" "dist\PillowLock-$env:APP_VERSION-x64.exe" -Force
+
+      - name: Generate SHA256 checksums
+        shell: pwsh
+        run: |
+          $hashLines = Get-FileHash "dist\PillowLock-$env:APP_VERSION-x64.msi","dist\PillowLock-$env:APP_VERSION-x64.exe" -Algorithm SHA256 |
+            ForEach-Object { "{0}  {1}" -f $_.Hash.ToLowerInvariant(), (Split-Path $_.Path -Leaf) }
+          Set-Content -Path "dist\PillowLock-$env:APP_VERSION-SHA256.txt" -Value $hashLines
+
+      - name: Publish GitHub release
+        shell: pwsh
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          $tag = "v$env:APP_VERSION"
+          $title = "PillowLock $tag"
+          $assets = @(
+            "dist\PillowLock-$env:APP_VERSION-x64.msi",
+            "dist\PillowLock-$env:APP_VERSION-x64.exe",
+            "dist\PillowLock-$env:APP_VERSION-SHA256.txt"
+          )
+          $notes = @"
+          Windows release for PillowLock $tag.
+
+          Assets:
+          - MSI installer
+          - Portable EXE
+          - SHA256 checksums
+          "@
+          gh release view $tag *> $null
+          if ($LASTEXITCODE -eq 0) {
+            gh release upload $tag @assets --clobber
+          } else {
+            gh release create $tag @assets --title $title --notes $notes
+          }
