@@ -1,0 +1,30 @@
+<?xml version="1.0" encoding="UTF-8"?>
+<Wix
+  xmlns="http://wixtoolset.org/schemas/v4/wxs"
+  xmlns:bal="http://wixtoolset.org/schemas/v4/wxs/bal">
+  <Bundle
+    Name="PillowLock"
+    Manufacturer="PillowLock"
+    Version="$(var.AppVersion)"
+    UpgradeCode="CA5C65D3-4C3F-45E8-9E10-D9A172C261F4"
+    IconSourceFile="$(var.RepoRoot)\assets\branding\logo.ico"
+    AboutUrl="$(var.GitHubRepoUrl)"
+    HelpUrl="$(var.GitHubRepoUrl)/issues"
+    UpdateUrl="$(var.GitHubRepoUrl)/releases">
+    <BootstrapperApplication>
+      <bal:WixStandardBootstrapperApplication
+        Theme="hyperlinkLicense"
+        LicenseUrl=""
+        LogoFile="$(var.RepoRoot)\assets\branding\installer-burn-logo.png"
+        LaunchTarget="[ProgramFiles64Folder]PillowLock\pillowlock.exe"
+        LaunchWorkingFolder="[ProgramFiles64Folder]PillowLock" />
+    </BootstrapperApplication>
+
+    <Chain>
+      <MsiPackage
+        SourceFile="$(var.MsiPath)"
+        Vital="yes"
+        Visible="no" />
+    </Chain>
+  </Bundle>
+</Wix>

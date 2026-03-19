@@ -133,6 +133,11 @@ export component AppWindow inherits Window {
     in-out property <string> workspace_subtitle;
     in-out property <string> source_surface_title;
     in-out property <string> source_surface_subtitle;
+    in-out property <string> input_kind_title;
+    in-out property <string> input_kind_subtitle;
+    in-out property <string> file_input_label;
+    in-out property <string> folder_input_label;
+    in-out property <bool> folder_input: false;
     in-out property <string> input_field_label;
     in-out property <string> input_path;
     in-out property <string> browse_input_label;
@@ -141,6 +146,25 @@ export component AppWindow inherits Window {
     in-out property <string> output_path;
     in-out property <string> suggest_output_label;
     in-out property <string> browse_output_label;
+    in-out property <string> compression_title;
+    in-out property <string> compression_subtitle;
+    in-out property <string> compression_fast_label;
+    in-out property <string> compression_balanced_label;
+    in-out property <string> compression_maximum_label;
+    in-out property <string> compression_none_label;
+    in-out property <bool> compression_fast_selected: false;
+    in-out property <bool> compression_balanced_selected: true;
+    in-out property <bool> compression_maximum_selected: false;
+    in-out property <bool> compression_none_selected: false;
+    in-out property <bool> compression_advanced: false;
+    in-out property <string> compression_advanced_label;
+    in-out property <string> compression_method_title;
+    in-out property <string> compression_store_label;
+    in-out property <string> compression_deflate_label;
+    in-out property <bool> compression_method_deflate: true;
+    in-out property <string> compression_level_title;
+    in-out property <string> compression_level;
+    in-out property <string> compression_level_placeholder;
     in-out property <string> keyfile_title;
     in-out property <string> keyfile_subtitle;
     in-out property <string> keyfile_field_label;
@@ -240,6 +264,9 @@ export component AppWindow inherits Window {
     callback create_keyfile(); callback clear_keyfile(); callback browse_new_keyfile(); callback clear_new_keyfile();
     callback run_job(); callback clear_form(); callback select_mode_encrypt(); callback select_mode_decrypt();
     callback select_profile_balanced(); callback select_profile_hardened(); callback select_language_english();
+    callback select_input_file(); callback select_input_folder();
+    callback select_compression_fast(); callback select_compression_balanced(); callback select_compression_maximum(); callback select_compression_none();
+    callback toggle_compression_advanced(); callback select_compression_method_stored(); callback select_compression_method_deflated();
     callback select_language_korean(); callback toggle_advanced(); callback toggle_queue(); callback toggle_queue_recursive();
     callback form_edited(); callback queue_current(); callback add_folder(); callback remove_queue_item(); callback run_queue();
     callback cancel_queue(); callback retry_failed_jobs(); callback clear_finished_queue(); callback select_queue_item(int);
@@ -364,6 +391,23 @@ export component AppWindow inherits Window {
                                 padding: 24px; spacing: 16px;
                                 Text { text: root.input_field_label; color: #18212f; font-size: 18px; font-weight: 700; }
                                 Text { text: root.source_surface_subtitle; color: #6b7280; font-size: 12px; }
+                                if root.encrypt_mode : Rectangle {
+                                    background: #f8fbff;
+                                    border-width: 1px;
+                                    border-color: #e3e9f1;
+                                    border-radius: 20px;
+                                    VerticalBox {
+                                        padding: 16px;
+                                        spacing: 10px;
+                                        Text { text: root.input_kind_title; color: #18212f; font-size: 13px; font-weight: 700; }
+                                        Text { text: root.input_kind_subtitle; color: #6b7280; font-size: 12px; wrap: word-wrap; }
+                                        HorizontalBox {
+                                            spacing: 10px;
+                                            PillButton { label: root.file_input_label; selected: !root.folder_input; enabled: !root.running && !root.can_stop_queue; clicked => { root.select_input_file(); } }
+                                            PillButton { label: root.folder_input_label; selected: root.folder_input; enabled: !root.running && !root.can_stop_queue; clicked => { root.select_input_folder(); } }
+                                        }
+                                    }
+                                }
                                 Rectangle {
                                     background: root.drop_hovered ? #e4efff : root.input_path == "" ? #f6f8fc : #ebf2ff;
                                     border-width: 1px; border-color: root.drop_hovered ? #316aff : root.input_path == "" ? #dce5ef : #b8cbfb; border-radius: 24px; height: 156px;
@@ -380,6 +424,40 @@ export component AppWindow inherits Window {
                                     LineEdit { text <=> root.output_path; placeholder-text: root.output_placeholder; enabled: root.has_input_file && !root.running && !root.can_stop_queue; horizontal-stretch: 1; edited => { root.form_edited(); } }
                                     SecondaryButton { label: root.suggest_output_label; enabled: root.has_input_file && !root.running && !root.can_stop_queue; clicked => { root.suggest_output(); } }
                                     SecondaryButton { label: root.browse_output_label; enabled: root.has_input_file && !root.running && !root.can_stop_queue; clicked => { root.browse_output(); } }
+                                }
+                                if root.encrypt_mode && root.folder_input : Rectangle {
+                                    background: #f8fbff;
+                                    border-width: 1px;
+                                    border-color: #e3e9f1;
+                                    border-radius: 20px;
+                                    VerticalBox {
+                                        padding: 16px;
+                                        spacing: 10px;
+                                        Text { text: root.compression_title; color: #18212f; font-size: 13px; font-weight: 700; }
+                                        Text { text: root.compression_subtitle; color: #6b7280; font-size: 12px; wrap: word-wrap; }
+                                        HorizontalBox {
+                                            spacing: 10px;
+                                            MiniPillButton { label: root.compression_fast_label; selected: root.compression_fast_selected; enabled: !root.running && !root.can_stop_queue; clicked => { root.select_compression_fast(); } }
+                                            MiniPillButton { label: root.compression_balanced_label; selected: root.compression_balanced_selected; enabled: !root.running && !root.can_stop_queue; clicked => { root.select_compression_balanced(); } }
+                                            MiniPillButton { label: root.compression_maximum_label; selected: root.compression_maximum_selected; enabled: !root.running && !root.can_stop_queue; clicked => { root.select_compression_maximum(); } }
+                                            MiniPillButton { label: root.compression_none_label; selected: root.compression_none_selected; enabled: !root.running && !root.can_stop_queue; clicked => { root.select_compression_none(); } }
+                                        }
+                                        HorizontalBox {
+                                            spacing: 10px;
+                                            MiniPillButton { label: root.compression_advanced_label; selected: root.compression_advanced; enabled: !root.running && !root.can_stop_queue; clicked => { root.toggle_compression_advanced(); } }
+                                        }
+                                        if root.compression_advanced : VerticalBox {
+                                            spacing: 10px;
+                                            Text { text: root.compression_method_title; color: #334155; font-size: 12px; font-weight: 600; }
+                                            HorizontalBox {
+                                                spacing: 10px;
+                                                MiniPillButton { label: root.compression_store_label; selected: !root.compression_method_deflate; enabled: !root.running && !root.can_stop_queue; clicked => { root.select_compression_method_stored(); } }
+                                                MiniPillButton { label: root.compression_deflate_label; selected: root.compression_method_deflate; enabled: !root.running && !root.can_stop_queue; clicked => { root.select_compression_method_deflated(); } }
+                                            }
+                                            Text { text: root.compression_level_title; color: #334155; font-size: 12px; font-weight: 600; }
+                                            LineEdit { text <=> root.compression_level; placeholder-text: root.compression_level_placeholder; enabled: root.compression_method_deflate && !root.running && !root.can_stop_queue; edited => { root.form_edited(); } }
+                                        }
+                                    }
                                 }
                             }
                         }

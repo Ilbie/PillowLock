@@ -1,11 +1,13 @@
 param(
     [switch]$BuildMsi,
+    [switch]$BuildSetup,
     [string]$UpdateRepo
 )
 
 $ErrorActionPreference = "Stop"
 
 $repoRoot = Split-Path -Parent $PSScriptRoot
+$defaultRepoSlug = "Ilbie/PillowLock"
 $cargoTomlPath = Join-Path $repoRoot "Cargo.toml"
 $versionLine = Select-String -Path $cargoTomlPath -Pattern '^version\s*=\s*"([^"]+)"$' | Select-Object -First 1
 
@@ -15,6 +17,7 @@ if (-not $versionLine) {
 
 $appVersion = $versionLine.Matches[0].Groups[1].Value
 $effectiveUpdateRepo = if ($UpdateRepo) { $UpdateRepo } else { $env:PILLOWLOCK_UPDATE_REPO }
+$bundleRepoSlug = if ($effectiveUpdateRepo) { $effectiveUpdateRepo } else { $defaultRepoSlug }
 $cargoExe = Join-Path $repoRoot ".local-rust\\toolchain\\bin\\cargo.exe"
 $rustcExe = Join-Path $repoRoot ".local-rust\\toolchain\\bin\\rustc.exe"
 $rustdocExe = Join-Path $repoRoot ".local-rust\\toolchain\\bin\\rustdoc.exe"
@@ -46,14 +49,14 @@ if (-not (Test-Path $vsDevCmd)) {
     throw "VsDevCmd.bat was not found at $vsDevCmd."
 }
 
-$buildCmd = @(
+$buildCmd = (@(
     ('"{0}" -arch=x64 >nul' -f $vsDevCmd),
     ('set PATH={0};%PATH%' -f (Split-Path -Parent $cargoExe)),
     ('set RUSTC={0}' -f $rustcExe),
     ('set RUSTDOC={0}' -f $rustdocExe),
     $(if ($effectiveUpdateRepo) { 'set PILLOWLOCK_UPDATE_REPO={0}' -f $effectiveUpdateRepo }),
     ('"{0}" build --release' -f $cargoExe)
-) -join " && "
+) | Where-Object { $_ }) -join " && "
 
 & cmd.exe /c $buildCmd
 if ($LASTEXITCODE -ne 0) {
@@ -65,7 +68,17 @@ if (-not (Test-Path $exePath)) {
     throw "Release executable was not produced at $exePath."
 }
 
-Write-Host "Built EXE:" $exePath
+if ($BuildSetup) {
+    $BuildMsi = $true
+}
+
+$distDir = Join-Path $repoRoot "dist"
+New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+
+$portableExePath = Join-Path $distDir ("PillowLock-{0}-portable-x64.exe" -f $appVersion)
+Copy-Item $exePath $portableExePath -Force
+
+Write-Host "Built portable EXE:" $portableExePath
 
 if (-not $BuildMsi) {
     return
@@ -75,15 +88,29 @@ $wixExe = Join-Path $repoRoot ".tools\\wix.exe"
 if (-not (Test-Path $wixExe)) {
     throw "WiX CLI was not found. Install it with: dotnet tool install --tool-path .tools wix"
 }
+$wixVersion = "6.0.2"
+$burnExtension = "WixToolset.BootstrapperApplications.wixext"
+$burnExtensionRef = "$burnExtension/$wixVersion"
+$uiExtension = "WixToolset.UI.wixext"
+$uiExtensionRef = "$uiExtension/$wixVersion"
+$wixAppData = Join-Path $repoRoot ".wix-user\\AppData\\Roaming"
+$wixLocalAppData = Join-Path $repoRoot ".wix-user\\AppData\\Local"
+New-Item -ItemType Directory -Force -Path $wixAppData | Out-Null
+New-Item -ItemType Directory -Force -Path $wixLocalAppData | Out-Null
+$env:APPDATA = $wixAppData
+$env:LOCALAPPDATA = $wixLocalAppData
 
-$distDir = Join-Path $repoRoot "dist"
-New-Item -ItemType Directory -Force -Path $distDir | Out-Null
+& $wixExe extension add -g $uiExtensionRef
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not install the WiX UI extension."
+}
 
 $wxsPath = Join-Path $repoRoot "packaging\\PillowLock.wxs"
 $msiPath = Join-Path $distDir ("PillowLock-{0}-x64.msi" -f $appVersion)
 
 & $wixExe build `
     $wxsPath `
+    -ext $uiExtensionRef `
     -arch x64 `
     -d "AppVersion=$appVersion" `
     -d "RepoRoot=$repoRoot" `
@@ -95,3 +122,32 @@ if ($LASTEXITCODE -ne 0) {
 }
 
 Write-Host "Built MSI:" $msiPath
+
+if (-not $BuildSetup) {
+    return
+}
+
+$bundleWxsPath = Join-Path $repoRoot "packaging\\PillowLock.Bundle.wxs"
+$setupExePath = Join-Path $distDir ("PillowLock-{0}-setup-x64.exe" -f $appVersion)
+$bundleRepoUrl = "https://github.com/$bundleRepoSlug"
+
+& $wixExe extension add -g $burnExtensionRef
+if ($LASTEXITCODE -ne 0) {
+    throw "Could not install the WiX Burn bootstrapper extension."
+}
+
+& $wixExe build `
+    $bundleWxsPath `
+    -ext $burnExtensionRef `
+    -arch x64 `
+    -d "AppVersion=$appVersion" `
+    -d "RepoRoot=$repoRoot" `
+    -d "MsiPath=$msiPath" `
+    -d "GitHubRepoUrl=$bundleRepoUrl" `
+    -o $setupExePath
+
+if ($LASTEXITCODE -ne 0) {
+    throw "Setup EXE build failed."
+}
+
+Write-Host "Built setup EXE:" $setupExePath

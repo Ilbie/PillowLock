@@ -43,27 +43,55 @@ jobs:
         run: cargo build --release
 
       - name: Install WiX CLI
-        run: dotnet tool install --tool-path .tools wix
+        run: dotnet tool install --tool-path .tools wix --version 6.0.2
 
-      - name: Package MSI and EXE
+      - name: Install WiX Burn extension
         shell: pwsh
+        run: .tools\wix.exe extension add -g WixToolset.BootstrapperApplications.wixext/6.0.2
+        env:
+          APPDATA: ${{ github.workspace }}\.wix-user\AppData\Roaming
+          LOCALAPPDATA: ${{ github.workspace }}\.wix-user\AppData\Local
+
+      - name: Install WiX UI extension
+        shell: pwsh
+        run: .tools\wix.exe extension add -g WixToolset.UI.wixext/6.0.2
+        env:
+          APPDATA: ${{ github.workspace }}\.wix-user\AppData\Roaming
+          LOCALAPPDATA: ${{ github.workspace }}\.wix-user\AppData\Local
+
+      - name: Package MSI, setup EXE, and portable EXE
+        shell: pwsh
+        env:
+          APPDATA: ${{ github.workspace }}\.wix-user\AppData\Roaming
+          LOCALAPPDATA: ${{ github.workspace }}\.wix-user\AppData\Local
         run: |
           $repoRoot = (Resolve-Path .).Path
           $buildOutputDir = Join-Path $repoRoot 'target\release'
+          $msiPath = Join-Path $repoRoot "dist\PillowLock-$env:APP_VERSION-x64.msi"
           New-Item -ItemType Directory -Force -Path dist | Out-Null
+          Copy-Item "target\release\pillowlock.exe" "dist\PillowLock-$env:APP_VERSION-portable-x64.exe" -Force
           .tools\wix.exe build `
             packaging\PillowLock.wxs `
+            -ext WixToolset.UI.wixext/6.0.2 `
             -arch x64 `
             -d "AppVersion=$env:APP_VERSION" `
             -d "RepoRoot=$repoRoot" `
             -d "BuildOutputDir=$buildOutputDir" `
-            -o "dist\PillowLock-$env:APP_VERSION-x64.msi"
-          Copy-Item "target\release\pillowlock.exe" "dist\PillowLock-$env:APP_VERSION-x64.exe" -Force
+            -o $msiPath
+          .tools\wix.exe build `
+            packaging\PillowLock.Bundle.wxs `
+            -ext WixToolset.BootstrapperApplications.wixext/6.0.2 `
+            -arch x64 `
+            -d "AppVersion=$env:APP_VERSION" `
+            -d "RepoRoot=$repoRoot" `
+            -d "MsiPath=$msiPath" `
+            -d "GitHubRepoUrl=https://github.com/$env:GITHUB_REPOSITORY" `
+            -o "dist\PillowLock-$env:APP_VERSION-setup-x64.exe"
 
       - name: Generate SHA256 checksums
         shell: pwsh
         run: |
-          $hashLines = Get-FileHash "dist\PillowLock-$env:APP_VERSION-x64.msi","dist\PillowLock-$env:APP_VERSION-x64.exe" -Algorithm SHA256 |
+          $hashLines = Get-FileHash "dist\PillowLock-$env:APP_VERSION-x64.msi","dist\PillowLock-$env:APP_VERSION-setup-x64.exe","dist\PillowLock-$env:APP_VERSION-portable-x64.exe" -Algorithm SHA256 |
             ForEach-Object { "{0}  {1}" -f $_.Hash.ToLowerInvariant(), (Split-Path $_.Path -Leaf) }
           Set-Content -Path "dist\PillowLock-$env:APP_VERSION-SHA256.txt" -Value $hashLines
 
@@ -76,13 +104,15 @@ jobs:
           $title = "PillowLock $tag"
           $assets = @(
             "dist\PillowLock-$env:APP_VERSION-x64.msi",
-            "dist\PillowLock-$env:APP_VERSION-x64.exe",
+            "dist\PillowLock-$env:APP_VERSION-setup-x64.exe",
+            "dist\PillowLock-$env:APP_VERSION-portable-x64.exe",
             "dist\PillowLock-$env:APP_VERSION-SHA256.txt"
           )
           $notes = @"
           Windows release for PillowLock $tag.
 
           Assets:
+          - Setup EXE
           - MSI installer
           - Portable EXE
           - SHA256 checksums

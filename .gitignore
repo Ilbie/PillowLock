@@ -3,6 +3,7 @@
 /dist/
 /.local-rust/
 /.tools/
+/.wix-user/
 /.tmp-test/
 
 # Editor and OS noise

@@ -2,9 +2,11 @@
 
 use arboard::Clipboard;
 use pillowlock::{
-    cleanup_stale_tempfiles, decrypt_file, decrypt_file_with_cancel, default_decrypted_output_path,
+    cleanup_stale_tempfiles, decrypt_file, decrypt_file_with_cancel,
+    default_decrypted_output_path_for_kind,
     default_encrypted_output_path, encrypt_file, encrypt_file_with_cancel, generate_keyfile,
-    inspect_vault, rewrap_vault, verify_vault, DecryptOptions, EncryptOptions, VaultConfig,
+    inspect_vault, rewrap_vault, verify_vault, DecryptOptions, EncryptOptions,
+    FolderArchiveOptions, FolderCompression, FolderCompressionMethod, PayloadKind, VaultConfig,
     VaultError, VaultSummary, CUSTOM_EXTENSION, LEGACY_CUSTOM_EXTENSION,
 };
 use rfd::FileDialog;
@@ -74,6 +76,45 @@ impl SecurityProfile {
                 argon_memory_kib: 524_288,
                 argon_iterations: 4,
                 argon_lanes: 1,
+            },
+        }
+    }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum InputKind {
+    File,
+    Folder,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+enum CompressionPreset {
+    Fast,
+    Balanced,
+    Maximum,
+    None,
+}
+
+impl CompressionPreset {
+    fn folder_compression(self) -> FolderCompression {
+        match self {
+            CompressionPreset::Fast => FolderCompression {
+                method: FolderCompressionMethod::Deflated,
+                level: Some(1),
+            },
+            CompressionPreset::Balanced => FolderCompression {
+                method: FolderCompressionMethod::Deflated,
+                level: Some(6),
+            },
+            CompressionPreset::Maximum => FolderCompression {
+                method: FolderCompressionMethod::Deflated,
+                level: Some(9),
+            },
+            CompressionPreset::None => FolderCompression {
+                method: FolderCompressionMethod::Stored,
+                level: None,
             },
         }
     }
@@ -192,6 +233,11 @@ struct PersistedSettings {
     language: Option<Language>,
     mode: Option<Mode>,
     profile: Option<SecurityProfile>,
+    input_kind: Option<InputKind>,
+    compression_preset: Option<CompressionPreset>,
+    compression_advanced: bool,
+    compression_method: Option<FolderCompressionMethod>,
+    compression_level: Option<i32>,
     last_output_folder: Option<String>,
     last_success_mode: Option<Mode>,
     last_success_profile: Option<SecurityProfile>,
@@ -206,9 +252,12 @@ struct PersistedSettings {
 struct QueuedJob {
     id: u64,
     mode: Mode,
+    input_kind: InputKind,
+    payload_kind: PayloadKind,
     input_path: String,
     output_path: String,
     keyfile_path_session: Option<String>,
+    folder_compression: Option<FolderCompression>,
     profile: SecurityProfile,
     status: QueueStatus,
     progress: i32,
@@ -220,6 +269,12 @@ struct AppState {
     language: Language,
     mode: Mode,
     profile: SecurityProfile,
+    input_kind: InputKind,
+    selected_payload_kind: PayloadKind,
+    compression_preset: CompressionPreset,
+    compression_advanced: bool,
+    compression_method: FolderCompressionMethod,
+    compression_level: i32,
     show_advanced: bool,
     show_settings: bool,
     show_queue: bool,
@@ -262,6 +317,8 @@ struct JobRequest {
     input: PathBuf,
     output: PathBuf,
     keyfile: Option<PathBuf>,
+    input_kind: InputKind,
+    folder_compression: Option<FolderCompression>,
     language: Language,
     mode: Mode,
     profile: SecurityProfile,
@@ -338,6 +395,12 @@ impl Default for AppState {
             language: Language::English,
             mode: Mode::Encrypt,
             profile: SecurityProfile::Balanced,
+            input_kind: InputKind::File,
+            selected_payload_kind: PayloadKind::SingleFile,
+            compression_preset: CompressionPreset::Balanced,
+            compression_advanced: false,
+            compression_method: FolderCompressionMethod::Deflated,
+            compression_level: 6,
             show_advanced: false,
             show_settings: false,
             show_queue: false,
@@ -350,7 +413,7 @@ impl Default for AppState {
             rotate_password: empty_secret(),
             rotate_confirm_password: empty_secret(),
             rotate_keyfile_path: String::new(),
-            status_line: "Choose a file to get started.".to_owned(),
+            status_line: "Choose a file or folder to get started.".to_owned(),
             status_tone: StatusTone::Idle,
             logs: vec!["PillowLock ready.".to_owned()],
             running: false,
@@ -389,6 +452,19 @@ impl AppState {
         if let Some(profile) = settings.profile {
             state.profile = profile;
         }
+        if let Some(input_kind) = settings.input_kind {
+            state.input_kind = input_kind;
+        }
+        if let Some(compression_preset) = settings.compression_preset {
+            state.compression_preset = compression_preset;
+        }
+        state.compression_advanced = settings.compression_advanced;
+        if let Some(compression_method) = settings.compression_method {
+            state.compression_method = compression_method;
+        }
+        if let Some(compression_level) = settings.compression_level {
+            state.compression_level = compression_level.clamp(0, 9);
+        }
         state.last_output_folder = settings.last_output_folder;
         state.last_success_mode = settings.last_success_mode;
         state.last_success_profile = settings.last_success_profile;
@@ -397,6 +473,11 @@ impl AppState {
         state.recent_successes = settings.recent_successes;
         state.show_queue = settings.show_queue;
         state.queue_recursive = settings.queue_recursive;
+        state.selected_payload_kind = if state.input_kind == InputKind::Folder {
+            PayloadKind::FolderArchive
+        } else {
+            PayloadKind::SingleFile
+        };
         state.prune_recent_entries();
         state.update_ui = UpdateUiState::new(state.language);
         state
@@ -407,6 +488,11 @@ impl AppState {
             language: Some(self.language),
             mode: Some(self.mode),
             profile: Some(self.profile),
+            input_kind: Some(self.input_kind),
+            compression_preset: Some(self.compression_preset),
+            compression_advanced: self.compression_advanced,
+            compression_method: Some(self.compression_method),
+            compression_level: Some(self.compression_level.clamp(0, 9)),
             last_output_folder: self.last_output_folder.clone(),
             last_success_mode: self.last_success_mode,
             last_success_profile: self.last_success_profile,
@@ -440,8 +526,48 @@ impl AppState {
         self.running || self.queue_running
     }
 
+    fn current_input_payload_kind(&self) -> PayloadKind {
+        match self.mode {
+            Mode::Encrypt => {
+                if self.input_kind == InputKind::Folder {
+                    PayloadKind::FolderArchive
+                } else {
+                    PayloadKind::SingleFile
+                }
+            }
+            Mode::Decrypt => self.selected_payload_kind,
+        }
+    }
+
+    fn effective_folder_compression(&self) -> FolderCompression {
+        if self.compression_advanced {
+            match self.compression_method {
+                FolderCompressionMethod::Stored => FolderCompression {
+                    method: FolderCompressionMethod::Stored,
+                    level: None,
+                },
+                FolderCompressionMethod::Deflated => FolderCompression {
+                    method: FolderCompressionMethod::Deflated,
+                    level: Some(self.compression_level.clamp(0, 9)),
+                },
+            }
+        } else {
+            self.compression_preset.folder_compression()
+        }
+    }
+
+    fn output_target_is_directory(&self) -> bool {
+        self.mode == Mode::Decrypt && self.selected_payload_kind == PayloadKind::FolderArchive
+    }
+
     fn default_status(&self) -> &'static str {
-        self.tr("Choose a file to get started.", "파일을 선택해 시작하세요.")
+        if self.mode == Mode::Encrypt && self.input_kind == InputKind::Folder {
+            self.tr("Choose a folder to get started.", "폴더를 선택해 시작하세요.")
+        } else if self.mode == Mode::Encrypt {
+            self.tr("Choose a file or folder to get started.", "파일이나 폴더를 선택해 시작하세요.")
+        } else {
+            self.tr("Choose a protected file to get started.", "보호 파일을 선택해 시작하세요.")
+        }
     }
 
     fn password_text(&self) -> &str {
@@ -546,9 +672,23 @@ impl AppState {
             return self.tr("The queue is currently running.", "배치 큐가 진행 중입니다.");
         }
         if !self.has_input_file() {
-            return self.tr("Choose an input file.", "입력 파일을 선택하세요.");
+            return match (self.mode, self.input_kind) {
+                (Mode::Encrypt, InputKind::Folder) => {
+                    self.tr("Choose an input folder.", "입력 폴더를 선택하세요.")
+                }
+                (Mode::Encrypt, InputKind::File) => {
+                    self.tr("Choose an input file or folder.", "입력 파일이나 폴더를 선택하세요.")
+                }
+                (Mode::Decrypt, _) => self.tr("Choose a protected file.", "보호 파일을 선택하세요."),
+            };
         }
         if !self.has_output_path() {
+            if self.output_target_is_directory() {
+                return self.tr(
+                    "Choose where the restored folder should be created.",
+                    "복원된 폴더를 만들 위치를 선택하세요.",
+                );
+            }
             return self.tr("Choose where the result should be saved.", "결과 파일 위치를 정하세요.");
         }
         if self.password_text().is_empty() {
@@ -571,6 +711,29 @@ impl AppState {
         match profile {
             SecurityProfile::Balanced => self.tr("Balanced", "균형"),
             SecurityProfile::Hardened => self.tr("Hardened", "강화"),
+        }
+    }
+
+    fn input_kind_label(&self, input_kind: InputKind) -> &'static str {
+        match input_kind {
+            InputKind::File => self.tr("File", "파일"),
+            InputKind::Folder => self.tr("Folder", "폴더"),
+        }
+    }
+
+    fn compression_preset_label(&self, preset: CompressionPreset) -> &'static str {
+        match preset {
+            CompressionPreset::Fast => self.tr("Fast", "빠름"),
+            CompressionPreset::Balanced => self.tr("Balanced", "균형"),
+            CompressionPreset::Maximum => self.tr("Maximum", "최대"),
+            CompressionPreset::None => self.tr("No compression", "무압축"),
+        }
+    }
+
+    fn payload_kind_label(&self, payload_kind: PayloadKind) -> &'static str {
+        match payload_kind {
+            PayloadKind::SingleFile => self.tr("Single file", "단일 파일"),
+            PayloadKind::FolderArchive => self.tr("Folder archive", "폴더 아카이브"),
         }
     }
 
@@ -612,6 +775,9 @@ impl AppState {
 
     fn action_label(&self) -> &'static str {
         match self.mode {
+            Mode::Encrypt if self.input_kind == InputKind::Folder => {
+                self.tr("Create Protected Archive", "보호 아카이브 만들기")
+            }
             Mode::Encrypt => self.tr("Create Protected File", "보호 파일 만들기"),
             Mode::Decrypt => self.tr("Restore Original File", "원본 파일 복원"),
         }
@@ -619,6 +785,10 @@ impl AppState {
 
     fn action_caption(&self) -> &'static str {
         match self.mode {
+            Mode::Encrypt if self.input_kind == InputKind::Folder => self.tr(
+                "PillowLock packages the folder into a temporary ZIP, then encrypts it into one protected file.",
+                "PillowLock이 폴더를 임시 ZIP으로 묶은 뒤 하나의 보호 파일로 암호화합니다.",
+            ),
             Mode::Encrypt => self.tr(
                 "PillowLock creates a new .plock file and leaves the original file untouched.",
                 "PillowLock는 새 .plock 파일을 만들고 원본 파일은 그대로 둡니다.",
@@ -632,6 +802,9 @@ impl AppState {
 
     fn workspace_title(&self) -> &'static str {
         match self.mode {
+            Mode::Encrypt if self.input_kind == InputKind::Folder => {
+                self.tr("Protect a folder", "폴더 보호")
+            }
             Mode::Encrypt => self.tr("Protect a file", "파일 보호"),
             Mode::Decrypt => self.tr("Restore a protected file", "보호 파일 복원"),
         }
@@ -639,6 +812,10 @@ impl AppState {
 
     fn workspace_subtitle(&self) -> &'static str {
         match self.mode {
+            Mode::Encrypt if self.input_kind == InputKind::Folder => self.tr(
+                "Pick a folder, choose compression, add a password, and build a single protected archive.",
+                "폴더를 고르고 압축을 선택한 뒤 비밀번호를 추가해 하나의 보호 아카이브를 만드세요.",
+            ),
             Mode::Encrypt => self.tr(
                 "Pick a file, add a password, and build a layered protected file.",
                 "파일을 고르고 비밀번호를 더해 계층형 보호 파일을 만드세요.",
@@ -652,12 +829,24 @@ impl AppState {
 
     fn source_surface_title(&self) -> &'static str {
         if self.drop_hovered {
-            self.tr("Release to add this file", "놓으면 이 파일을 추가합니다")
+            match self.mode {
+                Mode::Encrypt => self.tr("Release to add this item", "놓으면 이 항목을 추가합니다"),
+                Mode::Decrypt => self.tr("Release to add this file", "놓으면 이 파일을 추가합니다"),
+            }
         } else if !self.has_input_file() {
-            self.tr("Drop a file here", "여기로 파일을 끌어오세요")
+            match self.mode {
+                Mode::Encrypt => self.tr("Drop a file or folder here", "여기로 파일이나 폴더를 끌어오세요"),
+                Mode::Decrypt => self.tr("Drop a protected file here", "여기로 보호 파일을 끌어오세요"),
+            }
         } else {
             match self.mode {
+                Mode::Encrypt if self.input_kind == InputKind::Folder => {
+                    self.tr("Ready to protect this folder", "이 폴더를 보호할 준비가 됐습니다")
+                }
                 Mode::Encrypt => self.tr("Ready to protect this file", "이 파일을 보호할 준비가 됐습니다"),
+                Mode::Decrypt if self.selected_payload_kind == PayloadKind::FolderArchive => {
+                    self.tr("Ready to restore this protected folder", "이 보호 폴더를 복원할 준비가 됐습니다")
+                }
                 Mode::Decrypt => self.tr("Ready to restore this protected file", "이 보호 파일을 복원할 준비가 됐습니다"),
             }
         }
@@ -667,7 +856,21 @@ impl AppState {
         if self.drop_hovered {
             self.tr("Drop now and PillowLock will wire the next steps for you.", "지금 놓으면 PillowLock이 다음 단계를 바로 채웁니다.")
         } else if !self.has_input_file() {
-            self.tr("Drag a file here or browse. Multiple drops are added to the queue.", "파일을 끌어오거나 찾아보세요. 여러 파일은 큐에 추가됩니다.")
+            match self.mode {
+                Mode::Encrypt => self.tr(
+                    "Drag a file or folder here or browse. Multiple drops are added to the queue.",
+                    "파일이나 폴더를 끌어오거나 찾아보세요. 여러 항목은 큐에 추가됩니다.",
+                ),
+                Mode::Decrypt => self.tr(
+                    "Drag a protected file here or browse. Multiple drops are added to the queue.",
+                    "보호 파일을 끌어오거나 찾아보세요. 여러 파일은 큐에 추가됩니다.",
+                ),
+            }
+        } else if self.mode == Mode::Encrypt && self.input_kind == InputKind::Folder {
+            self.tr(
+                "You can switch folders, tune compression, or add more work to the queue at any time.",
+                "언제든 다른 폴더로 바꾸고 압축을 조정하거나 큐에 더 추가할 수 있습니다.",
+            )
         } else {
             self.tr("You can switch files or add more work to the queue at any time.", "언제든 다른 파일로 바꾸거나 큐에 더 추가할 수 있습니다.")
         }
@@ -718,10 +921,10 @@ impl AppState {
         }
     }
 
-    fn preferred_output_for(&self, input: &Path, mode: Mode) -> PathBuf {
+    fn preferred_output_for(&self, input: &Path, mode: Mode, payload_kind: PayloadKind) -> PathBuf {
         let suggested = match mode {
             Mode::Encrypt => default_encrypted_output_path(input),
-            Mode::Decrypt => default_decrypted_output_path(input),
+            Mode::Decrypt => default_decrypted_output_path_for_kind(input, payload_kind),
         };
         if let Some(folder) = self.last_output_folder.as_ref().map(PathBuf::from) {
             if folder.is_dir() {
@@ -735,7 +938,10 @@ impl AppState {
 
     fn refresh_output_suggestion(&mut self) {
         if let Some(input) = Self::trimmed_path(&self.input_path) {
-            self.output_path = self.preferred_output_for(&input, self.mode).display().to_string();
+            self.output_path = self
+                .preferred_output_for(&input, self.mode, self.current_input_payload_kind())
+                .display()
+                .to_string();
         }
     }
 
@@ -764,12 +970,86 @@ impl AppState {
     fn set_mode(&mut self, mode: Mode) {
         if self.mode != mode {
             self.mode = mode;
+            if self.mode == Mode::Encrypt {
+                self.selected_payload_kind = if self.input_kind == InputKind::Folder {
+                    PayloadKind::FolderArchive
+                } else {
+                    PayloadKind::SingleFile
+                };
+            } else if let Some(input) = Self::trimmed_path(&self.input_path) {
+                self.selected_payload_kind = inspect_vault(&input)
+                    .map(|summary| summary.payload_kind)
+                    .unwrap_or(PayloadKind::SingleFile);
+            }
             if self.has_input_file() {
                 self.refresh_output_suggestion();
             }
             if !self.busy() {
                 self.set_status(StatusTone::Idle, self.default_status());
             }
+        }
+    }
+
+    fn set_input_kind(&mut self, input_kind: InputKind) {
+        if self.input_kind == input_kind {
+            return;
+        }
+        self.input_kind = input_kind;
+        self.selected_payload_kind = if input_kind == InputKind::Folder {
+            PayloadKind::FolderArchive
+        } else {
+            PayloadKind::SingleFile
+        };
+
+        if let Some(input) = Self::trimmed_path(&self.input_path) {
+            let mismatched = (input_kind == InputKind::Folder && input.is_file())
+                || (input_kind == InputKind::File && input.is_dir());
+            if mismatched {
+                self.input_path.clear();
+                self.output_path.clear();
+            } else {
+                self.refresh_output_suggestion();
+            }
+        }
+
+        if !self.busy() {
+            self.set_status(StatusTone::Idle, self.default_status());
+        }
+    }
+
+    fn set_compression_preset(&mut self, preset: CompressionPreset) {
+        self.compression_preset = preset;
+        if !self.compression_advanced {
+            let compression = preset.folder_compression();
+            self.compression_method = compression.method;
+            self.compression_level = compression.level.unwrap_or(0);
+        }
+        if !self.busy() {
+            self.set_status(StatusTone::Idle, self.default_status());
+        }
+    }
+
+    fn toggle_compression_advanced(&mut self) {
+        self.compression_advanced = !self.compression_advanced;
+        if self.compression_advanced {
+            let compression = self.compression_preset.folder_compression();
+            self.compression_method = compression.method;
+            self.compression_level = compression.level.unwrap_or(0);
+        }
+        if !self.busy() {
+            self.set_status(StatusTone::Idle, self.default_status());
+        }
+    }
+
+    fn set_compression_method(&mut self, method: FolderCompressionMethod) {
+        self.compression_method = method;
+        if method == FolderCompressionMethod::Stored {
+            self.compression_level = 0;
+        } else if self.compression_level == 0 {
+            self.compression_level = 6;
+        }
+        if !self.busy() {
+            self.set_status(StatusTone::Idle, self.default_status());
         }
     }
 
@@ -789,11 +1069,21 @@ impl AppState {
     }
 
     fn apply_input_path(&mut self, path: PathBuf) {
-        self.mode = if is_supported_vault_path(&path) {
-            Mode::Decrypt
+        if is_supported_vault_path(&path) {
+            self.mode = Mode::Decrypt;
+            self.selected_payload_kind = inspect_vault(&path)
+                .map(|summary| summary.payload_kind)
+                .unwrap_or(PayloadKind::SingleFile);
+        } else if path.is_dir() {
+            self.mode = Mode::Encrypt;
+            self.input_kind = InputKind::Folder;
+            self.selected_payload_kind = PayloadKind::FolderArchive;
         } else {
-            self.mode
-        };
+            if self.mode == Mode::Encrypt {
+                self.input_kind = InputKind::File;
+            }
+            self.selected_payload_kind = PayloadKind::SingleFile;
+        }
         self.input_path = path.display().to_string();
         self.refresh_output_suggestion();
         self.remember_recent_input(self.input_path.clone());
@@ -802,6 +1092,13 @@ impl AppState {
     }
 
     fn browse_input(&mut self) {
+        if self.mode == Mode::Encrypt && self.input_kind == InputKind::Folder {
+            if let Some(path) = FileDialog::new().pick_folder() {
+                self.apply_input_path(path);
+            }
+            return;
+        }
+
         let dialog = match self.mode {
             Mode::Encrypt => FileDialog::new(),
             Mode::Decrypt => {
@@ -820,6 +1117,8 @@ impl AppState {
                             self.mode,
                             self.profile,
                             Self::trimmed_path(&self.keyfile_path),
+                            None,
+                            InputKind::File,
                             None,
                         )
                         .is_ok()
@@ -843,6 +1142,16 @@ impl AppState {
             self.set_status(StatusTone::Idle, self.tr("Input file added.", "입력 파일을 추가했습니다."));
             return;
         }
+        let dropped_input_kind = if self.mode == Mode::Encrypt && path.is_dir() {
+            InputKind::Folder
+        } else {
+            self.input_kind
+        };
+        let folder_compression = if self.mode == Mode::Encrypt && dropped_input_kind == InputKind::Folder {
+            Some(self.effective_folder_compression())
+        } else {
+            None
+        };
         if self
             .enqueue_path(
                 &path,
@@ -850,6 +1159,8 @@ impl AppState {
                 self.profile,
                 Self::trimmed_path(&self.keyfile_path),
                 None,
+                dropped_input_kind,
+                folder_compression,
             )
             .is_ok()
         {
@@ -859,6 +1170,16 @@ impl AppState {
     }
 
     fn browse_output(&mut self) {
+        if self.output_target_is_directory() {
+            let current_name = Self::trimmed_path(&self.output_path)
+                .and_then(|path| path.file_name().map(|name| name.to_string_lossy().into_owned()))
+                .unwrap_or_else(|| "restored-folder".to_owned());
+            if let Some(parent) = FileDialog::new().pick_folder() {
+                self.output_path = parent.join(current_name).display().to_string();
+                self.set_status(StatusTone::Idle, self.tr("Output path updated.", "출력 경로를 업데이트했습니다."));
+            }
+            return;
+        }
         let mut dialog = FileDialog::new();
         if let Some(path) = Self::trimmed_path(&self.output_path) {
             if let Some(name) = path.file_name().and_then(|name| name.to_str()) {
@@ -931,12 +1252,28 @@ impl AppState {
         let output = Self::trimmed_path(&self.output_path)
             .ok_or_else(|| self.tr("Choose where the result should be saved.", "결과 파일 위치를 정하세요.").to_owned())?;
         let keyfile = Self::trimmed_path(&self.keyfile_path);
+        let input_kind = self.input_kind;
+        let folder_compression = if self.mode == Mode::Encrypt && input_kind == InputKind::Folder {
+            Some(self.effective_folder_compression())
+        } else {
+            None
+        };
         let password = self.password.clone();
         self.clear_passwords();
         self.running = true;
         self.set_status(StatusTone::Working, self.tr("Running. Please wait for completion.", "작업 중입니다. 완료될 때까지 기다려주세요."));
         self.add_log(format!("{}: {} -> {}", self.mode_label(self.mode), input.display(), output.display()));
-        Ok(JobRequest { input, output, keyfile, language: self.language, mode: self.mode, profile: self.profile, password })
+        Ok(JobRequest {
+            input,
+            output,
+            keyfile,
+            input_kind,
+            folder_compression,
+            language: self.language,
+            mode: self.mode,
+            profile: self.profile,
+            password,
+        })
     }
 
     fn prepare_verify(&mut self) -> Result<VerifyRequest, String> {
@@ -1024,7 +1361,20 @@ impl AppState {
         let output = Self::trimmed_path(&self.output_path)
             .ok_or_else(|| self.tr("Choose where the queued result should be saved.", "큐 작업의 출력 위치를 정하세요.").to_owned())?;
         let keyfile = Self::trimmed_path(&self.keyfile_path);
-        self.enqueue_path(&input, self.mode, self.profile, keyfile, Some(output))?;
+        let folder_compression = if self.mode == Mode::Encrypt && self.input_kind == InputKind::Folder {
+            Some(self.effective_folder_compression())
+        } else {
+            None
+        };
+        self.enqueue_path(
+            &input,
+            self.mode,
+            self.profile,
+            keyfile,
+            Some(output),
+            self.input_kind,
+            folder_compression,
+        )?;
         self.show_queue = true;
         Ok(())
     }
@@ -1036,8 +1386,23 @@ impl AppState {
         profile: SecurityProfile,
         keyfile: Option<PathBuf>,
         output_override: Option<PathBuf>,
+        input_kind: InputKind,
+        folder_compression: Option<FolderCompression>,
     ) -> Result<(), String> {
-        let output = output_override.unwrap_or_else(|| self.preferred_output_for(input, mode));
+        let payload_kind = match mode {
+            Mode::Encrypt => {
+                if input_kind == InputKind::Folder || input.is_dir() {
+                    PayloadKind::FolderArchive
+                } else {
+                    PayloadKind::SingleFile
+                }
+            }
+            Mode::Decrypt => inspect_vault(input)
+                .map(|summary| summary.payload_kind)
+                .unwrap_or(PayloadKind::SingleFile),
+        };
+        let output =
+            output_override.unwrap_or_else(|| self.preferred_output_for(input, mode, payload_kind));
         let input_string = input.display().to_string();
         let output_string = output.display().to_string();
         if self
@@ -1056,9 +1421,12 @@ impl AppState {
         self.queue_items.push(QueuedJob {
             id,
             mode,
+            input_kind,
+            payload_kind,
             input_path: input_string.clone(),
             output_path: output_string.clone(),
             keyfile_path_session,
+            folder_compression,
             profile,
             status: QueueStatus::Pending,
             progress: 0,
@@ -1074,6 +1442,27 @@ impl AppState {
             return;
         }
         if let Some(folder) = FileDialog::new().pick_folder() {
+            if self.mode == Mode::Encrypt && self.input_kind == InputKind::Folder {
+                match self.enqueue_path(
+                    &folder,
+                    self.mode,
+                    self.profile,
+                    Self::trimmed_path(&self.keyfile_path),
+                    None,
+                    InputKind::Folder,
+                    Some(self.effective_folder_compression()),
+                ) {
+                    Ok(()) => {
+                        self.show_queue = true;
+                        self.set_status(
+                            StatusTone::Success,
+                            self.tr("Folder added to the queue.", "폴더를 큐에 추가했습니다."),
+                        );
+                    }
+                    Err(message) => self.set_status(StatusTone::Error, message),
+                }
+                return;
+            }
             match collect_files_in_folder(&folder, self.queue_recursive, self.mode) {
                 Ok(paths) if paths.is_empty() => {
                     self.set_status(StatusTone::Error, self.tr("No matching files were found in that folder.", "해당 폴더에서 조건에 맞는 파일을 찾지 못했습니다."));
@@ -1087,6 +1476,8 @@ impl AppState {
                                 self.mode,
                                 self.profile,
                                 Self::trimmed_path(&self.keyfile_path),
+                                None,
+                                InputKind::File,
                                 None,
                             )
                             .is_ok()
@@ -1288,7 +1679,7 @@ impl AppState {
     }
 
     fn prune_recent_entries(&mut self) {
-        self.recent_inputs.retain(|path| PathBuf::from(path).is_file());
+        self.recent_inputs.retain(|path| PathBuf::from(path).exists());
         self.recent_output_folders.retain(|path| PathBuf::from(path).is_dir());
         self.recent_successes.retain(|entry| {
             PathBuf::from(&entry.input_path).exists()
@@ -1521,7 +1912,7 @@ impl AppState {
         };
         let asset_name = self.update_ui.download_asset_name.clone().unwrap_or_else(|| {
             format!(
-                "PillowLock-{}-x64.msi",
+                "PillowLock-{}-setup-x64.exe",
                 self.update_ui
                     .latest_version
                     .clone()
@@ -1640,10 +2031,15 @@ impl AppState {
         self.queue_items
             .iter()
             .map(|item| {
+                let item_kind = match item.mode {
+                    Mode::Encrypt => self.input_kind_label(item.input_kind),
+                    Mode::Decrypt => self.payload_kind_label(item.payload_kind),
+                };
                 SharedString::from(format!(
-                    "[{}] {} | {} -> {}{}",
+                    "[{}] {} | {} | {} -> {}{}",
                     self.queue_status_label(item.status),
                     self.mode_label(item.mode),
+                    item_kind,
                     short_name(&item.input_path, self.language),
                     short_name(&item.output_path, self.language),
                     item.last_error.as_ref().map(|err| format!(" | {err}")).unwrap_or_default()
@@ -1838,8 +2234,8 @@ fn release_notes_excerpt(body: Option<String>) -> Option<String> {
 fn pick_installer_asset(assets: &[GitHubReleaseAsset]) -> Option<&GitHubReleaseAsset> {
     assets
         .iter()
-        .find(|asset| asset.name.to_ascii_lowercase().ends_with(".msi"))
-        .or_else(|| assets.iter().find(|asset| asset.name.to_ascii_lowercase().ends_with(".exe")))
+        .find(|asset| asset.name.eq_ignore_ascii_case("setup.exe") || asset.name.to_ascii_lowercase().ends_with("-setup-x64.exe"))
+        .or_else(|| assets.iter().find(|asset| asset.name.to_ascii_lowercase().ends_with(".msi")))
 }
 
 fn run_curl_capture(args: &[String]) -> Result<Vec<u8>, String> {
@@ -1995,8 +2391,12 @@ fn collect_files_inner(folder: &Path, recursive: bool, mode: Mode, files: &mut V
 fn format_vault_summary(summary: &VaultSummary, language: Language) -> String {
     match language {
         Language::English => format!(
-            "Version: {}\nCipher: {}\nKDF: {}\nKey wrap: {}\nKey file required: {}\nChunk size: {} MiB\nArgon memory: {} MiB\nArgon iterations: {}\nArgon lanes: {}\nSupports key rotation: {}",
+            "Version: {}\nPayload: {}\nCipher: {}\nKDF: {}\nKey wrap: {}\nKey file required: {}\nChunk size: {} MiB\nArgon memory: {} MiB\nArgon iterations: {}\nArgon lanes: {}\nSupports key rotation: {}",
             summary.version,
+            match summary.payload_kind {
+                PayloadKind::SingleFile => "single file",
+                PayloadKind::FolderArchive => "folder archive",
+            },
             summary.cipher,
             summary.kdf,
             summary.key_wrap,
@@ -2008,8 +2408,12 @@ fn format_vault_summary(summary: &VaultSummary, language: Language) -> String {
             if summary.supports_rewrap { "yes" } else { "no" },
         ),
         Language::Korean => format!(
-            "버전: {}\n암호: {}\nKDF: {}\n키 래핑: {}\n키 파일 필요: {}\n청크 크기: {} MiB\nArgon 메모리: {} MiB\nArgon 반복: {}\nArgon 레인: {}\n키 교체 지원: {}",
+            "버전: {}\n페이로드: {}\n암호: {}\nKDF: {}\n키 래핑: {}\n키 파일 필요: {}\n청크 크기: {} MiB\nArgon 메모리: {} MiB\nArgon 반복: {}\nArgon 레인: {}\n키 교체 지원: {}",
             summary.version,
+            match summary.payload_kind {
+                PayloadKind::SingleFile => "단일 파일",
+                PayloadKind::FolderArchive => "폴더 아카이브",
+            },
             summary.cipher,
             summary.kdf,
             summary.key_wrap,
@@ -2060,6 +2464,10 @@ fn error_to_text(error: &VaultError, language: Language) -> String {
         VaultError::UnsupportedVersion(version) => match language {
             Language::English => format!("This protected-file version is not supported.\n{version}"),
             Language::Korean => format!("지원하지 않는 보호 파일 버전입니다.\n{version}"),
+        },
+        VaultError::UnsupportedPayloadKind(kind) => match language {
+            Language::English => format!("This protected payload type is not supported.\n{kind}"),
+            Language::Korean => format!("지원하지 않는 페이로드 형식입니다.\n{kind}"),
         },
         VaultError::UnsupportedRewrapVersion(version) => match language {
             Language::English => format!("Key rotation is not supported for this protected-file version.\n{version}"),
@@ -2113,6 +2521,10 @@ fn error_to_text(error: &VaultError, language: Language) -> String {
             Language::English => "The file exceeds the size limit of the current format.".to_owned(),
             Language::Korean => "파일이 현재 형식의 크기 제한을 초과했습니다.".to_owned(),
         },
+        VaultError::Archive(message) => match language {
+            Language::English => format!("The folder archive could not be processed.\n{message}"),
+            Language::Korean => format!("폴더 아카이브를 처리할 수 없습니다.\n{message}"),
+        },
     }
 }
 
@@ -2124,6 +2536,10 @@ fn pull_form_fields(window: &AppWindow, state: &mut AppState) {
     state.rotate_password = secret_from_string(window.get_rotate_password().to_string());
     state.rotate_confirm_password = secret_from_string(window.get_rotate_confirm_password().to_string());
     state.rotate_keyfile_path = window.get_rotate_keyfile_path().to_string();
+    let level_text = window.get_compression_level().to_string();
+    if let Ok(level) = level_text.trim().parse::<i32>() {
+        state.compression_level = level.clamp(0, 9);
+    }
 }
 
 fn string_model(items: Vec<SharedString>) -> ModelRc<SharedString> {
@@ -2212,12 +2628,130 @@ fn sync_ui(window: &AppWindow, state: &AppState) {
     window.set_workspace_subtitle(state.workspace_subtitle().into());
     window.set_source_surface_title(state.source_surface_title().into());
     window.set_source_surface_subtitle(state.source_surface_subtitle().into());
+    window.set_folder_input(state.input_kind == InputKind::Folder);
+    window.set_input_kind_title(state.tr("Input kind", "입력 종류").into());
+    window.set_input_kind_subtitle(
+        state
+            .tr(
+                "Choose whether PillowLock should work with one file or package an entire folder into a single protected archive.",
+                "파일 하나를 처리할지, 폴더 전체를 하나의 보호 아카이브로 묶을지 선택하세요.",
+            )
+            .into(),
+    );
+    window.set_file_input_label(state.input_kind_label(InputKind::File).into());
+    window.set_folder_input_label(state.input_kind_label(InputKind::Folder).into());
     window.set_input_field_label(state.tr("1. Choose a file", "1. 파일 선택").into());
     window.set_input_path(state.input_path.clone().into());
+    window.set_input_field_label(
+        state
+            .tr(
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "1. Choose a folder"
+                } else {
+                    "1. Choose a file"
+                },
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "1. 폴더 선택"
+                } else {
+                    "1. 파일 선택"
+                },
+            )
+            .into(),
+    );
+    window.set_browse_input_label(
+        state
+            .tr(
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "Browse folders"
+                } else {
+                    "Browse files"
+                },
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "폴더 찾기"
+                } else {
+                    "파일 찾기"
+                },
+            )
+            .into(),
+    );
     window.set_browse_input_label(state.tr("Browse files", "파일 찾기").into());
     window.set_output_field_label(state.tr("Save result to", "저장 위치").into());
     window.set_output_placeholder(state.tr("Choose where the result should be saved", "결과 파일이 저장될 위치를 고르세요").into());
     window.set_output_path(state.output_path.clone().into());
+    window.set_output_field_label(
+        state
+            .tr(
+                if state.output_target_is_directory() {
+                    "Restore folder to"
+                } else {
+                    "Save result to"
+                },
+                if state.output_target_is_directory() {
+                    "폴더 복원 위치"
+                } else {
+                    "결과 저장 위치"
+                },
+            )
+            .into(),
+    );
+    window.set_output_placeholder(
+        state
+            .tr(
+                if state.output_target_is_directory() {
+                    "Choose where the restored folder should be created"
+                } else {
+                    "Choose where the result should be saved"
+                },
+                if state.output_target_is_directory() {
+                    "복원된 폴더를 만들 위치를 선택하세요"
+                } else {
+                    "결과를 저장할 위치를 선택하세요"
+                },
+            )
+            .into(),
+    );
+    window.set_browse_output_label(
+        state
+            .tr(
+                if state.output_target_is_directory() {
+                    "Choose parent folder"
+                } else {
+                    "Choose location"
+                },
+                if state.output_target_is_directory() {
+                    "상위 폴더 선택"
+                } else {
+                    "위치 선택"
+                },
+            )
+            .into(),
+    );
+    window.set_compression_title(state.tr("Folder compression", "폴더 압축").into());
+    window.set_compression_subtitle(
+        state
+            .tr(
+                "Pick a preset for the temporary ZIP container or switch to advanced controls.",
+                "임시 ZIP 컨테이너에 사용할 프리셋을 고르거나 고급 설정으로 전환하세요.",
+            )
+            .into(),
+    );
+    window.set_compression_fast_label(state.compression_preset_label(CompressionPreset::Fast).into());
+    window.set_compression_balanced_label(state.compression_preset_label(CompressionPreset::Balanced).into());
+    window.set_compression_maximum_label(state.compression_preset_label(CompressionPreset::Maximum).into());
+    window.set_compression_none_label(state.compression_preset_label(CompressionPreset::None).into());
+    window.set_compression_fast_selected(state.compression_preset == CompressionPreset::Fast);
+    window.set_compression_balanced_selected(state.compression_preset == CompressionPreset::Balanced);
+    window.set_compression_maximum_selected(state.compression_preset == CompressionPreset::Maximum);
+    window.set_compression_none_selected(state.compression_preset == CompressionPreset::None);
+    window.set_compression_advanced(state.compression_advanced);
+    window.set_compression_advanced_label(state.tr("Advanced", "고급").into());
+    window.set_compression_method_title(state.tr("Method", "방식").into());
+    window.set_compression_store_label(state.tr("Store", "저장").into());
+    window.set_compression_deflate_label(state.tr("Deflate", "Deflate").into());
+    window.set_compression_method_deflate(state.compression_method == FolderCompressionMethod::Deflated);
+    window.set_compression_level_title(state.tr("Level (0-9)", "레벨 (0-9)").into());
+    window.set_compression_level(state.compression_level.to_string().into());
+    window.set_compression_level_placeholder(state.tr("6", "6").into());
     window.set_suggest_output_label(state.tr("Use suggested path", "추천 경로").into());
     window.set_browse_output_label(state.tr("Choose location", "위치 선택").into());
     window.set_keyfile_title(state.tr("2. Optional key file", "2. 선택형 키 파일").into());
@@ -2383,6 +2917,86 @@ fn sync_ui(window: &AppWindow, state: &AppState) {
             .into(),
     );
     window.set_profile_group_hint(state.profile_group_hint().into());
+    window.set_input_field_label(
+        state
+            .tr(
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "Choose your folder"
+                } else {
+                    "Choose your file"
+                },
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "폴더를 선택하세요"
+                } else {
+                    "파일을 선택하세요"
+                },
+            )
+            .into(),
+    );
+    window.set_browse_input_label(
+        state
+            .tr(
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "Browse folders"
+                } else {
+                    "Browse files"
+                },
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "폴더 찾기"
+                } else {
+                    "파일 찾기"
+                },
+            )
+            .into(),
+    );
+    window.set_output_field_label(
+        state
+            .tr(
+                if state.output_target_is_directory() {
+                    "Restore folder to"
+                } else {
+                    "Save result to"
+                },
+                if state.output_target_is_directory() {
+                    "폴더 복원 위치"
+                } else {
+                    "결과 저장 위치"
+                },
+            )
+            .into(),
+    );
+    window.set_output_placeholder(
+        state
+            .tr(
+                if state.output_target_is_directory() {
+                    "Choose where the restored folder should be created"
+                } else {
+                    "Choose where the result should be saved"
+                },
+                if state.output_target_is_directory() {
+                    "복원된 폴더를 만들 위치를 선택하세요"
+                } else {
+                    "결과를 저장할 위치를 선택하세요"
+                },
+            )
+            .into(),
+    );
+    window.set_browse_output_label(
+        state
+            .tr(
+                if state.output_target_is_directory() {
+                    "Choose parent folder"
+                } else {
+                    "Choose location"
+                },
+                if state.output_target_is_directory() {
+                    "상위 폴더 선택"
+                } else {
+                    "위치 선택"
+                },
+            )
+            .into(),
+    );
     window.set_input_field_label(state.tr("Choose your file", "파일을 선택하세요").into());
     window.set_keyfile_title(state.tr("Optional extra key", "선택형 추가 키").into());
     window.set_keyfile_subtitle(
@@ -2446,6 +3060,86 @@ fn sync_ui(window: &AppWindow, state: &AppState) {
     window.set_check_updates_label(state.tr("Check for updates", "업데이트 확인").into());
     window.set_install_update_label(state.tr("Download and install", "다운로드 후 설치").into());
     window.set_open_release_label(state.tr("Open release page", "릴리스 페이지 열기").into());
+    window.set_input_field_label(
+        state
+            .tr(
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "Choose your folder"
+                } else {
+                    "Choose your file"
+                },
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "폴더를 선택하세요"
+                } else {
+                    "파일을 선택하세요"
+                },
+            )
+            .into(),
+    );
+    window.set_browse_input_label(
+        state
+            .tr(
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "Browse folders"
+                } else {
+                    "Browse files"
+                },
+                if state.mode == Mode::Encrypt && state.input_kind == InputKind::Folder {
+                    "폴더 찾기"
+                } else {
+                    "파일 찾기"
+                },
+            )
+            .into(),
+    );
+    window.set_output_field_label(
+        state
+            .tr(
+                if state.output_target_is_directory() {
+                    "Restore folder to"
+                } else {
+                    "Save result to"
+                },
+                if state.output_target_is_directory() {
+                    "폴더 복원 위치"
+                } else {
+                    "결과 저장 위치"
+                },
+            )
+            .into(),
+    );
+    window.set_output_placeholder(
+        state
+            .tr(
+                if state.output_target_is_directory() {
+                    "Choose where the restored folder should be created"
+                } else {
+                    "Choose where the result should be saved"
+                },
+                if state.output_target_is_directory() {
+                    "복원된 폴더를 만들 위치를 선택하세요"
+                } else {
+                    "결과를 저장할 위치를 선택하세요"
+                },
+            )
+            .into(),
+    );
+    window.set_browse_output_label(
+        state
+            .tr(
+                if state.output_target_is_directory() {
+                    "Choose parent folder"
+                } else {
+                    "Choose location"
+                },
+                if state.output_target_is_directory() {
+                    "상위 폴더 선택"
+                } else {
+                    "위치 선택"
+                },
+            )
+            .into(),
+    );
 }
 
 fn start_update_check(weak: &slint::Weak<AppWindow>, shared: &Arc<Mutex<AppState>>) {
@@ -2675,6 +3369,51 @@ fn install_callbacks(window: &AppWindow, shared: Arc<Mutex<AppState>>) {
         let weak = weak.clone();
         let shared = shared.clone();
         move || with_state(&weak, &shared, |_window, state| state.set_language(Language::Korean))
+    });
+    window.on_select_input_file({
+        let weak = weak.clone();
+        let shared = shared.clone();
+        move || with_state(&weak, &shared, |_window, state| state.set_input_kind(InputKind::File))
+    });
+    window.on_select_input_folder({
+        let weak = weak.clone();
+        let shared = shared.clone();
+        move || with_state(&weak, &shared, |_window, state| state.set_input_kind(InputKind::Folder))
+    });
+    window.on_select_compression_fast({
+        let weak = weak.clone();
+        let shared = shared.clone();
+        move || with_state(&weak, &shared, |_window, state| state.set_compression_preset(CompressionPreset::Fast))
+    });
+    window.on_select_compression_balanced({
+        let weak = weak.clone();
+        let shared = shared.clone();
+        move || with_state(&weak, &shared, |_window, state| state.set_compression_preset(CompressionPreset::Balanced))
+    });
+    window.on_select_compression_maximum({
+        let weak = weak.clone();
+        let shared = shared.clone();
+        move || with_state(&weak, &shared, |_window, state| state.set_compression_preset(CompressionPreset::Maximum))
+    });
+    window.on_select_compression_none({
+        let weak = weak.clone();
+        let shared = shared.clone();
+        move || with_state(&weak, &shared, |_window, state| state.set_compression_preset(CompressionPreset::None))
+    });
+    window.on_toggle_compression_advanced({
+        let weak = weak.clone();
+        let shared = shared.clone();
+        move || with_state(&weak, &shared, |_window, state| state.toggle_compression_advanced())
+    });
+    window.on_select_compression_method_stored({
+        let weak = weak.clone();
+        let shared = shared.clone();
+        move || with_state(&weak, &shared, |_window, state| state.set_compression_method(FolderCompressionMethod::Stored))
+    });
+    window.on_select_compression_method_deflated({
+        let weak = weak.clone();
+        let shared = shared.clone();
+        move || with_state(&weak, &shared, |_window, state| state.set_compression_method(FolderCompressionMethod::Deflated))
     });
     window.on_toggle_advanced({
         let weak = weak.clone();
@@ -2916,7 +3655,13 @@ fn install_callbacks(window: &AppWindow, shared: Arc<Mutex<AppState>>) {
                             &input,
                             &output,
                             request.password.expose_secret(),
-                            &EncryptOptions { config: item.profile.config(), keyfile },
+                            &EncryptOptions {
+                                config: item.profile.config(),
+                                keyfile,
+                                folder_archive: item
+                                    .folder_compression
+                                    .map(|compression| FolderArchiveOptions { compression }),
+                            },
                             request.cancel_flag.as_ref(),
                         )
                         .map(|_| output.clone()),
@@ -2982,14 +3727,33 @@ fn install_callbacks(window: &AppWindow, shared: Arc<Mutex<AppState>>) {
             let weak = weak.clone();
             let shared = shared.clone();
             thread::spawn(move || {
-                let JobRequest { input, output, keyfile, language, mode, profile, password } = job;
+                let JobRequest {
+                    input,
+                    output,
+                    keyfile,
+                    input_kind,
+                    folder_compression,
+                    language,
+                    mode,
+                    profile,
+                    password,
+                    ..
+                } = job;
                 let input_for_ui = input.clone();
                 let result = match mode {
                     Mode::Encrypt => encrypt_file(
                         &input,
                         &output,
                         password.expose_secret(),
-                        &EncryptOptions { config: profile.config(), keyfile },
+                        &EncryptOptions {
+                            config: profile.config(),
+                            keyfile,
+                            folder_archive: if input_kind == InputKind::Folder {
+                                folder_compression.map(|compression| FolderArchiveOptions { compression })
+                            } else {
+                                None
+                            },
+                        },
                     )
                     .map(|_| output.clone()),
                     Mode::Decrypt => decrypt_file(
@@ -3084,8 +3848,8 @@ mod tests {
     fn retry_failed_jobs_only_resets_failed_items() {
         let mut state = AppState::default();
         state.queue_items = vec![
-            QueuedJob { id: 1, mode: Mode::Encrypt, input_path: "a".into(), output_path: "b".into(), keyfile_path_session: None, profile: SecurityProfile::Balanced, status: QueueStatus::Failed, progress: 0, last_error: Some("boom".into()) },
-            QueuedJob { id: 2, mode: Mode::Encrypt, input_path: "c".into(), output_path: "d".into(), keyfile_path_session: None, profile: SecurityProfile::Balanced, status: QueueStatus::Cancelled, progress: 0, last_error: Some("cancelled".into()) },
+            QueuedJob { id: 1, mode: Mode::Encrypt, input_kind: InputKind::File, payload_kind: PayloadKind::SingleFile, input_path: "a".into(), output_path: "b".into(), keyfile_path_session: None, folder_compression: None, profile: SecurityProfile::Balanced, status: QueueStatus::Failed, progress: 0, last_error: Some("boom".into()) },
+            QueuedJob { id: 2, mode: Mode::Encrypt, input_kind: InputKind::File, payload_kind: PayloadKind::SingleFile, input_path: "c".into(), output_path: "d".into(), keyfile_path_session: None, folder_compression: None, profile: SecurityProfile::Balanced, status: QueueStatus::Cancelled, progress: 0, last_error: Some("cancelled".into()) },
         ];
         state.retry_failed_jobs();
         assert_eq!(state.queue_items[0].status, QueueStatus::Pending);
@@ -3101,11 +3865,15 @@ mod tests {
     }
 
     #[test]
-    fn installer_asset_prefers_msi_before_exe() {
+    fn installer_asset_prefers_setup_before_msi() {
         let assets = vec![
             GitHubReleaseAsset {
-                name: "PillowLock-0.2.0-x64.exe".into(),
-                browser_download_url: "https://example.com/PillowLock.exe".into(),
+                name: "PillowLock-0.2.0-portable-x64.exe".into(),
+                browser_download_url: "https://example.com/PillowLock-portable.exe".into(),
+            },
+            GitHubReleaseAsset {
+                name: "PillowLock-0.2.0-setup-x64.exe".into(),
+                browser_download_url: "https://example.com/PillowLock-setup.exe".into(),
             },
             GitHubReleaseAsset {
                 name: "PillowLock-0.2.0-x64.msi".into(),
@@ -3113,7 +3881,7 @@ mod tests {
             },
         ];
         let chosen = pick_installer_asset(&assets).expect("installer asset");
-        assert!(chosen.name.ends_with(".msi"));
+        assert!(chosen.name.ends_with("-setup-x64.exe"));
     }
 
     #[test]

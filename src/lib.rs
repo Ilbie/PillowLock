@@ -6,6 +6,7 @@ use aes_gcm::{
 use argon2::{Algorithm, Argon2, Params, Version};
 use hkdf::Hkdf;
 use rand::{rngs::OsRng, RngCore};
+use serde::{Deserialize, Serialize};
 use sha2::{Digest, Sha512};
 use std::{
     ffi::OsString,
@@ -19,6 +20,11 @@ use thiserror::Error;
 #[cfg(windows)]
 use windows_sys::Win32::Storage::FileSystem::{SetFileAttributesW, FILE_ATTRIBUTE_HIDDEN};
 use zeroize::Zeroize;
+use zip::{
+    write::FileOptions as ZipFileOptions,
+    CompressionMethod as ZipCompressionMethod,
+    ZipArchive, ZipWriter,
+};
 #[cfg(windows)]
 use std::os::windows::ffi::OsStrExt;
 
@@ -74,6 +80,85 @@ const TEMP_FILE_PREFIX: &str = ".plock-";
 const TEMP_KEYFILE_PREFIX: &str = ".plock-key-";
 const TEMP_FILE_SUFFIX: &str = ".tmp";
 const TEMP_TRACKING_FILE_NAME: &str = "pillowlock-active-tempfiles.txt";
+const FOLDER_ARCHIVE_VERSION: u32 = 1;
+const FOLDER_ARCHIVE_MANIFEST_DIR: &str = "__pillowlock__";
+const FOLDER_ARCHIVE_MANIFEST_PATH: &str = "__pillowlock__/folder-manifest.json";
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum PayloadKind {
+    SingleFile,
+    FolderArchive,
+}
+
+impl PayloadKind {
+    fn code(self) -> u8 {
+        match self {
+            Self::SingleFile => 0,
+            Self::FolderArchive => 1,
+        }
+    }
+
+    fn from_code(code: u8) -> Result<Self, VaultError> {
+        match code {
+            0 => Ok(Self::SingleFile),
+            1 => Ok(Self::FolderArchive),
+            other => Err(VaultError::UnsupportedPayloadKind(other)),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(rename_all = "snake_case")]
+pub enum FolderCompressionMethod {
+    Stored,
+    Deflated,
+}
+
+impl FolderCompressionMethod {
+    fn into_zip(self) -> ZipCompressionMethod {
+        match self {
+            Self::Stored => ZipCompressionMethod::Stored,
+            Self::Deflated => ZipCompressionMethod::Deflated,
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderCompression {
+    pub method: FolderCompressionMethod,
+    pub level: Option<i32>,
+}
+
+impl Default for FolderCompression {
+    fn default() -> Self {
+        Self {
+            method: FolderCompressionMethod::Deflated,
+            level: Some(6),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+#[serde(default)]
+pub struct FolderArchiveOptions {
+    pub compression: FolderCompression,
+}
+
+impl Default for FolderArchiveOptions {
+    fn default() -> Self {
+        Self {
+            compression: FolderCompression::default(),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Serialize, Deserialize)]
+struct FolderArchiveManifest {
+    version: u32,
+    root_name: String,
+}
 
 #[derive(Debug, Clone, Copy)]
 pub struct VaultConfig {
@@ -98,6 +183,7 @@ impl Default for VaultConfig {
 pub struct EncryptOptions {
     pub config: VaultConfig,
     pub keyfile: Option<PathBuf>,
+    pub folder_archive: Option<FolderArchiveOptions>,
 }
 
 impl Default for EncryptOptions {
@@ -105,6 +191,7 @@ impl Default for EncryptOptions {
         Self {
             config: VaultConfig::default(),
             keyfile: None,
+            folder_archive: None,
         }
     }
 }
@@ -117,6 +204,7 @@ pub struct DecryptOptions {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct VaultSummary {
     pub version: u8,
+    pub payload_kind: PayloadKind,
     pub cipher: &'static str,
     pub kdf: &'static str,
     pub key_wrap: &'static str,
@@ -148,6 +236,8 @@ pub enum VaultError {
     InvalidFormat,
     #[error("unsupported encrypted file version: {0}")]
     UnsupportedVersion(u8),
+    #[error("unsupported payload kind: {0}")]
+    UnsupportedPayloadKind(u8),
     #[error("key rotation is not supported for encrypted file version: {0}")]
     UnsupportedRewrapVersion(u8),
     #[error("this v4 vault was created with a legacy layout that cannot be rewrapped in place")]
@@ -174,6 +264,8 @@ pub enum VaultError {
     TooManyChunks,
     #[error("file is too large for this container format")]
     FileTooLarge,
+    #[error("folder archive is invalid: {0}")]
+    Archive(String),
 }
 
 impl From<argon2::Error> for VaultError {
@@ -618,6 +710,7 @@ impl HeaderV3 {
 #[derive(Debug, Clone)]
 struct HeaderV4 {
     flags: u8,
+    payload_kind: PayloadKind,
     chunk_size: u32,
     argon_memory_kib: u32,
     argon_iterations: u32,
@@ -632,7 +725,11 @@ struct HeaderV4 {
 }
 
 impl HeaderV4 {
-    fn new(config: &VaultConfig, use_keyfile: bool) -> Result<Self, VaultError> {
+    fn new(
+        config: &VaultConfig,
+        use_keyfile: bool,
+        payload_kind: PayloadKind,
+    ) -> Result<Self, VaultError> {
         validate_config(config)?;
 
         let mut password_kdf_salt = [0u8; SALT_LEN];
@@ -652,6 +749,7 @@ impl HeaderV4 {
             } else {
                 0
             },
+            payload_kind,
             chunk_size: config.chunk_size as u32,
             argon_memory_kib: config.argon_memory_kib,
             argon_iterations: config.argon_iterations,
@@ -704,7 +802,9 @@ impl HeaderV4 {
         out[offset] = CONTENT_ALG_ID_AES256_GCM;
         offset += 1;
 
-        offset += 3;
+        out[offset] = self.payload_kind.code();
+        offset += 1;
+        offset += 2;
 
         out[offset..offset + 4].copy_from_slice(&self.chunk_size.to_le_bytes());
         offset += 4;
@@ -769,6 +869,7 @@ impl HeaderV4 {
         }
 
         let mut offset = 12usize;
+        let payload_kind = PayloadKind::from_code(encoded[9])?;
         let chunk_size = u32::from_le_bytes(
             encoded[offset..offset + 4]
                 .try_into()
@@ -843,6 +944,7 @@ impl HeaderV4 {
 
         Ok(Self {
             flags,
+            payload_kind,
             chunk_size,
             argon_memory_kib,
             argon_iterations,
@@ -931,9 +1033,16 @@ impl HeaderV1 {
 }
 
 pub fn default_encrypted_output_path(input: &Path) -> PathBuf {
-    let mut name: OsString = input.as_os_str().to_os_string();
-    name.push(format!(".{CUSTOM_EXTENSION}"));
-    PathBuf::from(name)
+    if input.is_dir() {
+        let mut name: OsString = input.as_os_str().to_os_string();
+        name.push(".zip");
+        name.push(format!(".{CUSTOM_EXTENSION}"));
+        PathBuf::from(name)
+    } else {
+        let mut name: OsString = input.as_os_str().to_os_string();
+        name.push(format!(".{CUSTOM_EXTENSION}"));
+        PathBuf::from(name)
+    }
 }
 
 pub fn default_decrypted_output_path(input: &Path) -> PathBuf {
@@ -951,6 +1060,25 @@ pub fn default_decrypted_output_path(input: &Path) -> PathBuf {
             .and_then(|name| name.to_str())
             .unwrap_or("decrypted_output");
         input.with_file_name(format!("{filename}.decrypted"))
+    }
+}
+
+pub fn default_decrypted_output_path_for_kind(input: &Path, payload_kind: PayloadKind) -> PathBuf {
+    let suggested = default_decrypted_output_path(input);
+    if payload_kind != PayloadKind::FolderArchive {
+        return suggested;
+    }
+
+    let has_zip_extension = suggested
+        .extension()
+        .and_then(|ext| ext.to_str())
+        .map(|ext| ext.eq_ignore_ascii_case("zip"))
+        .unwrap_or(false);
+
+    if has_zip_extension {
+        suggested.with_extension("")
+    } else {
+        suggested
     }
 }
 
@@ -1003,12 +1131,25 @@ fn encrypt_file_v4(
     options: &EncryptOptions,
     cancel_flag: Option<&AtomicBool>,
 ) -> Result<(), VaultError> {
-    ensure_file_input(input)?;
     ensure_output_target(input, output)?;
     check_cancelled(cancel_flag)?;
 
-    let input_size = fs::metadata(input)?.len();
-    let mut header = HeaderV4::new(&options.config, options.keyfile.is_some())?;
+    let payload_kind = detect_input_payload_kind(input)?;
+    let mut archive_temp = None;
+    let content_input = if payload_kind == PayloadKind::FolderArchive {
+        let folder_archive = options.folder_archive.clone().unwrap_or_default();
+        let temp_parent = std::env::temp_dir();
+        let mut temp = create_tracked_tempfile(&temp_parent, TEMP_FILE_PREFIX)?;
+        write_folder_archive(input, &mut temp, &folder_archive, cancel_flag)?;
+        archive_temp = Some(temp);
+        archive_temp.as_ref().expect("archive temp set").path().to_path_buf()
+    } else {
+        ensure_file_input(input)?;
+        input.to_path_buf()
+    };
+
+    let input_size = fs::metadata(&content_input)?.len();
+    let mut header = HeaderV4::new(&options.config, options.keyfile.is_some(), payload_kind)?;
 
     let mut wrapping_key = derive_wrapping_key_v4(password, options.keyfile.as_deref(), &header)?;
     let wrapping_cipher =
@@ -1038,7 +1179,7 @@ fn encrypt_file_v4(
     let content_cipher = Aes256Gcm::new_from_slice(&fek).map_err(|_| VaultError::EncryptionFailure)?;
 
     let parent = resolve_parent_directory(output)?;
-    let input_file = File::open(input)?;
+    let input_file = File::open(&content_input)?;
     let mut reader = BufReader::new(input_file);
     let mut temp = create_tracked_tempfile(&parent, TEMP_FILE_PREFIX)?;
 
@@ -1063,6 +1204,7 @@ fn encrypt_file_v4(
     fek.zeroize();
     wrapped_plaintext.zeroize();
     wrapped_key_material.zeroize();
+    drop(archive_temp);
 
     persist_tempfile_noclobber(temp, output)?;
     Ok(())
@@ -1227,35 +1369,61 @@ fn decrypt_file_v4_inner(
 
     let content_cipher = Aes256Gcm::new_from_slice(&fek).map_err(|_| VaultError::EncryptionFailure)?;
     let parent = resolve_parent_directory(output)?;
-    let mut temp = create_tracked_tempfile(&parent, TEMP_FILE_PREFIX)?;
     let content_aad = header.content_aad();
+    let aad_bytes: &[u8] = if use_legacy_content_aad {
+        &header_bytes
+    } else {
+        &content_aad
+    };
 
-    {
-        let mut writer = BufWriter::new(temp.as_file_mut());
-        let written = decrypt_stream(
-            &mut reader,
-            &mut writer,
-            &content_cipher,
-            if use_legacy_content_aad {
-                &header_bytes
-            } else {
-                &content_aad
-            },
-            header.chunk_size as usize,
-            &header.content_nonce_prefix,
-            cancel_flag,
-        )?;
-        if written != plaintext_size {
-            return Err(VaultError::InvalidFormat);
+    match header.payload_kind {
+        PayloadKind::SingleFile => {
+            let mut temp = create_tracked_tempfile(&parent, TEMP_FILE_PREFIX)?;
+            {
+                let mut writer = BufWriter::new(temp.as_file_mut());
+                let written = decrypt_stream(
+                    &mut reader,
+                    &mut writer,
+                    &content_cipher,
+                    aad_bytes,
+                    header.chunk_size as usize,
+                    &header.content_nonce_prefix,
+                    cancel_flag,
+                )?;
+                if written != plaintext_size {
+                    return Err(VaultError::InvalidFormat);
+                }
+                writer.flush()?;
+            }
+
+            temp.as_file_mut().sync_all()?;
+            fek.zeroize();
+            persist_tempfile_noclobber(temp, output)?;
+            Ok(())
         }
-        writer.flush()?;
+        PayloadKind::FolderArchive => {
+            let mut temp_zip = create_tracked_tempfile(&parent, TEMP_FILE_PREFIX)?;
+            {
+                let mut writer = BufWriter::new(temp_zip.as_file_mut());
+                let written = decrypt_stream(
+                    &mut reader,
+                    &mut writer,
+                    &content_cipher,
+                    aad_bytes,
+                    header.chunk_size as usize,
+                    &header.content_nonce_prefix,
+                    cancel_flag,
+                )?;
+                if written != plaintext_size {
+                    return Err(VaultError::InvalidFormat);
+                }
+                writer.flush()?;
+            }
+            temp_zip.as_file_mut().sync_all()?;
+            fek.zeroize();
+            extract_folder_archive(temp_zip.path(), output, cancel_flag)
+        }
     }
-
-    temp.as_file_mut().sync_all()?;
-    fek.zeroize();
-
-    persist_tempfile_noclobber(temp, output)?;
-    Ok(())
 }
 
 fn decrypt_file_v2(
@@ -1505,6 +1673,249 @@ fn persist_tempfile_noclobber(temp: NamedTempFile, output: &Path) -> Result<(), 
                 VaultError::Io(error.error)
             }
         })
+}
+
+#[derive(Debug, Clone)]
+struct FolderArchiveEntry {
+    absolute_path: PathBuf,
+    relative_path: PathBuf,
+    is_dir: bool,
+}
+
+fn detect_input_payload_kind(path: &Path) -> Result<PayloadKind, VaultError> {
+    let meta = fs::metadata(path).map_err(|_| VaultError::InvalidInputPath)?;
+    if meta.is_file() {
+        Ok(PayloadKind::SingleFile)
+    } else if meta.is_dir() {
+        Ok(PayloadKind::FolderArchive)
+    } else {
+        Err(VaultError::InvalidInputPath)
+    }
+}
+
+fn zip_error_to_vault(error: zip::result::ZipError) -> VaultError {
+    VaultError::Archive(error.to_string())
+}
+
+fn relative_path_components(relative: &Path) -> Result<Vec<String>, VaultError> {
+    let mut parts = Vec::new();
+    for component in relative.components() {
+        match component {
+            std::path::Component::Normal(value) => parts.push(value.to_string_lossy().into_owned()),
+            _ => {
+                return Err(VaultError::Archive(format!(
+                    "Unsupported folder path: {}",
+                    relative.display()
+                )))
+            }
+        }
+    }
+
+    if let Some(first) = parts.first() {
+        if first.eq_ignore_ascii_case(FOLDER_ARCHIVE_MANIFEST_DIR) {
+            return Err(VaultError::Archive(format!(
+                "The top-level name '{FOLDER_ARCHIVE_MANIFEST_DIR}' is reserved for PillowLock folder archives."
+            )));
+        }
+    }
+
+    Ok(parts)
+}
+
+fn relative_path_to_archive_name(relative: &Path) -> Result<String, VaultError> {
+    let parts = relative_path_components(relative)?;
+    if parts.is_empty() {
+        return Err(VaultError::Archive("Folder archive path cannot be empty.".to_owned()));
+    }
+    Ok(parts.join("/"))
+}
+
+fn validate_folder_archive_root_name(root_name: &str) -> Result<(), VaultError> {
+    let parts = relative_path_components(Path::new(root_name))?;
+    if parts.len() != 1 {
+        return Err(VaultError::Archive(
+            "Folder archive root name must be a single path segment.".to_owned(),
+        ));
+    }
+    Ok(())
+}
+
+fn collect_folder_archive_entries(
+    root: &Path,
+    current: &Path,
+    entries: &mut Vec<FolderArchiveEntry>,
+) -> Result<(), VaultError> {
+    let mut children = fs::read_dir(current)?.collect::<Result<Vec<_>, _>>()?;
+    children.sort_by(|left, right| left.file_name().cmp(&right.file_name()));
+
+    if current != root {
+        let relative = current
+            .strip_prefix(root)
+            .map_err(|_| VaultError::InvalidInputPath)?
+            .to_path_buf();
+        let _ = relative_path_to_archive_name(&relative)?;
+        entries.push(FolderArchiveEntry {
+            absolute_path: current.to_path_buf(),
+            relative_path: relative,
+            is_dir: true,
+        });
+    }
+
+    for child in children {
+        let file_type = child.file_type()?;
+        let path = child.path();
+        if file_type.is_dir() {
+            collect_folder_archive_entries(root, &path, entries)?;
+        } else if file_type.is_file() {
+            let relative = path
+                .strip_prefix(root)
+                .map_err(|_| VaultError::InvalidInputPath)?
+                .to_path_buf();
+            let _ = relative_path_to_archive_name(&relative)?;
+            entries.push(FolderArchiveEntry {
+                absolute_path: path,
+                relative_path: relative,
+                is_dir: false,
+            });
+        } else {
+            return Err(VaultError::Archive(format!(
+                "Only regular files and directories are supported inside protected folders: {}",
+                path.display()
+            )));
+        }
+    }
+
+    Ok(())
+}
+
+fn write_folder_archive(
+    input: &Path,
+    temp: &mut NamedTempFile,
+    options: &FolderArchiveOptions,
+    cancel_flag: Option<&AtomicBool>,
+) -> Result<(), VaultError> {
+    let root_name = input
+        .file_name()
+        .and_then(|name| name.to_str())
+        .filter(|name| !name.is_empty())
+        .unwrap_or("folder")
+        .to_owned();
+    let manifest = FolderArchiveManifest {
+        version: FOLDER_ARCHIVE_VERSION,
+        root_name,
+    };
+    let manifest_bytes = serde_json::to_vec_pretty(&manifest)
+        .map_err(|error| VaultError::Archive(format!("Could not encode folder manifest: {error}")))?;
+    let mut entries = Vec::new();
+    collect_folder_archive_entries(input, input, &mut entries)?;
+
+    let stored_options =
+        ZipFileOptions::default().compression_method(ZipCompressionMethod::Stored);
+    let file_options = ZipFileOptions::default()
+        .compression_method(options.compression.method.into_zip())
+        .compression_level(options.compression.level);
+
+    {
+        let mut zip = ZipWriter::new(temp.as_file_mut());
+        zip.add_directory(format!("{FOLDER_ARCHIVE_MANIFEST_DIR}/"), stored_options)
+            .map_err(zip_error_to_vault)?;
+        zip.start_file(FOLDER_ARCHIVE_MANIFEST_PATH, stored_options)
+            .map_err(zip_error_to_vault)?;
+        zip.write_all(&manifest_bytes)?;
+
+        for entry in entries {
+            check_cancelled(cancel_flag)?;
+            let archive_name = relative_path_to_archive_name(&entry.relative_path)?;
+            if entry.is_dir {
+                zip.add_directory(format!("{archive_name}/"), stored_options)
+                    .map_err(zip_error_to_vault)?;
+            } else {
+                zip.start_file(archive_name, file_options)
+                    .map_err(zip_error_to_vault)?;
+                let mut file = File::open(&entry.absolute_path)?;
+                io::copy(&mut file, &mut zip)?;
+            }
+        }
+
+        zip.finish().map_err(zip_error_to_vault)?;
+    }
+
+    temp.as_file_mut().sync_all()?;
+    Ok(())
+}
+
+fn read_folder_archive_manifest(
+    archive: &mut ZipArchive<File>,
+) -> Result<FolderArchiveManifest, VaultError> {
+    let mut manifest_file = archive
+        .by_name(FOLDER_ARCHIVE_MANIFEST_PATH)
+        .map_err(|_| VaultError::Archive("Folder archive manifest is missing.".to_owned()))?;
+    let mut bytes = Vec::new();
+    manifest_file.read_to_end(&mut bytes)?;
+    let manifest = serde_json::from_slice::<FolderArchiveManifest>(&bytes)
+        .map_err(|error| VaultError::Archive(format!("Could not parse folder manifest: {error}")))?;
+    if manifest.version != FOLDER_ARCHIVE_VERSION {
+        return Err(VaultError::Archive(format!(
+            "Unsupported folder manifest version: {}",
+            manifest.version
+        )));
+    }
+    validate_folder_archive_root_name(&manifest.root_name)?;
+    Ok(manifest)
+}
+
+fn extract_folder_archive(
+    archive_path: &Path,
+    output: &Path,
+    cancel_flag: Option<&AtomicBool>,
+) -> Result<(), VaultError> {
+    if output.exists() {
+        return Err(VaultError::OutputExists(output.display().to_string()));
+    }
+
+    let parent = resolve_parent_directory(output)?;
+    let file = File::open(archive_path)?;
+    let mut archive = ZipArchive::new(file).map_err(zip_error_to_vault)?;
+    let _manifest = read_folder_archive_manifest(&mut archive)?;
+    let staging = Builder::new().prefix(".plock-dir-").tempdir_in(&parent)?;
+
+    for index in 0..archive.len() {
+        check_cancelled(cancel_flag)?;
+        let mut entry = archive.by_index(index).map_err(zip_error_to_vault)?;
+        let entry_name = entry.name().to_owned();
+        if entry_name == format!("{FOLDER_ARCHIVE_MANIFEST_DIR}/")
+            || entry_name == FOLDER_ARCHIVE_MANIFEST_PATH
+        {
+            continue;
+        }
+
+        let enclosed = entry.enclosed_name().map(Path::to_path_buf).ok_or_else(|| {
+            VaultError::Archive(format!("Archive entry path is unsafe: {entry_name}"))
+        })?;
+        let _ = relative_path_to_archive_name(&enclosed)?;
+        let target_path = staging.path().join(&enclosed);
+
+        if entry.is_dir() {
+            fs::create_dir_all(&target_path)?;
+            continue;
+        }
+
+        if let Some(parent_dir) = target_path.parent() {
+            fs::create_dir_all(parent_dir)?;
+        }
+        let mut output_file = File::create(&target_path)?;
+        io::copy(&mut entry, &mut output_file)?;
+        output_file.sync_all()?;
+    }
+
+    let staging_path = staging.keep();
+    match fs::rename(&staging_path, output) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = fs::remove_dir_all(&staging_path);
+            Err(VaultError::Io(error))
+        }
+    }
 }
 
 fn validate_config(config: &VaultConfig) -> Result<(), VaultError> {
@@ -2097,6 +2508,7 @@ pub fn inspect_vault(path: &Path) -> Result<VaultSummary, VaultError> {
             let (header, _) = read_header_v1(&mut reader)?;
             Ok(VaultSummary {
                 version: VERSION_V1,
+                payload_kind: PayloadKind::SingleFile,
                 cipher: "AES-256-GCM",
                 kdf: "Argon2id",
                 key_wrap: "Direct content key",
@@ -2114,6 +2526,7 @@ pub fn inspect_vault(path: &Path) -> Result<VaultSummary, VaultError> {
             let (header, _) = read_header_v2(&mut reader)?;
             Ok(VaultSummary {
                 version: VERSION_V2,
+                payload_kind: PayloadKind::SingleFile,
                 cipher: "AES-256-GCM",
                 kdf: "Argon2id",
                 key_wrap: "HKDF-wrapped FEK",
@@ -2131,6 +2544,7 @@ pub fn inspect_vault(path: &Path) -> Result<VaultSummary, VaultError> {
             let (header, _) = read_header_v3(&mut reader)?;
             Ok(VaultSummary {
                 version: VERSION_V3,
+                payload_kind: PayloadKind::SingleFile,
                 cipher: "AES-256-GCM",
                 kdf: "Argon2id",
                 key_wrap: "Layered password/keyfile wrap",
@@ -2148,6 +2562,7 @@ pub fn inspect_vault(path: &Path) -> Result<VaultSummary, VaultError> {
             let (header, _) = read_header_v4(&mut reader)?;
             Ok(VaultSummary {
                 version: VERSION_V4,
+                payload_kind: header.payload_kind,
                 cipher: "AES-256-GCM",
                 kdf: "Argon2id",
                 key_wrap: "Bound password+keyfile wrap",
@@ -2471,6 +2886,23 @@ mod tests {
     use std::io::Write;
     use tempfile::tempdir;
 
+    fn test_vault_config() -> VaultConfig {
+        VaultConfig {
+            chunk_size: 256 * 1024,
+            argon_memory_kib: MIN_ARGON_MEMORY_KIB,
+            argon_iterations: 1,
+            argon_lanes: 1,
+        }
+    }
+
+    fn test_encrypt_options() -> EncryptOptions {
+        EncryptOptions {
+            config: test_vault_config(),
+            keyfile: None,
+            folder_archive: None,
+        }
+    }
+
     #[test]
     fn round_trip_current_format_password_only() {
         let dir = tempdir().unwrap();
@@ -2484,7 +2916,7 @@ mod tests {
             &input,
             &encrypted,
             "correct horse battery staple",
-            &EncryptOptions::default(),
+            &test_encrypt_options(),
         )
         .unwrap();
         decrypt_file(
@@ -2512,8 +2944,9 @@ mod tests {
         generate_keyfile(&keyfile).unwrap();
 
         let enc = EncryptOptions {
-            config: VaultConfig::default(),
+            config: test_vault_config(),
             keyfile: Some(keyfile.clone()),
+            folder_archive: None,
         };
         let dec = DecryptOptions {
             keyfile: Some(keyfile.clone()),
@@ -2537,8 +2970,9 @@ mod tests {
         generate_keyfile(&keyfile).unwrap();
 
         let enc = EncryptOptions {
-            config: VaultConfig::default(),
+            config: test_vault_config(),
             keyfile: Some(keyfile.clone()),
+            folder_archive: None,
         };
 
         encrypt_file(&input, &encrypted, "right-password", &enc).unwrap();
@@ -2570,8 +3004,9 @@ mod tests {
             &encrypted,
             "right-password",
             &EncryptOptions {
-                config: VaultConfig::default(),
+                config: test_vault_config(),
                 keyfile: Some(keyfile),
+                folder_archive: None,
             },
         )
         .unwrap();
@@ -2601,7 +3036,7 @@ mod tests {
             &input,
             &encrypted,
             "right-password",
-            &EncryptOptions::default(),
+            &test_encrypt_options(),
         )
         .unwrap();
         let err = decrypt_file(
@@ -2627,7 +3062,7 @@ mod tests {
             &input,
             &encrypted,
             "right-password",
-            &EncryptOptions::default(),
+            &test_encrypt_options(),
         )
         .unwrap();
 
@@ -2650,9 +3085,14 @@ mod tests {
     fn legacy_extension_still_maps_to_original_name() {
         let legacy = PathBuf::from("example.txt.rvault");
         let current = PathBuf::from("example.txt.plock");
+        let folder_archive = PathBuf::from("docs.zip.plock");
 
         assert_eq!(default_decrypted_output_path(&legacy), PathBuf::from("example.txt"));
         assert_eq!(default_decrypted_output_path(&current), PathBuf::from("example.txt"));
+        assert_eq!(
+            default_decrypted_output_path_for_kind(&folder_archive, PayloadKind::FolderArchive),
+            PathBuf::from("docs")
+        );
     }
 
     #[test]
@@ -2708,7 +3148,7 @@ mod tests {
             &input,
             &encrypted,
             "compat-password",
-            &EncryptOptions::default(),
+            &test_encrypt_options(),
         )
         .unwrap();
 
@@ -2740,8 +3180,9 @@ mod tests {
             &v3_path,
             "inspect-password",
             &EncryptOptions {
-                config: VaultConfig::default(),
+                config: test_vault_config(),
                 keyfile: Some(keyfile.clone()),
+                folder_archive: None,
             },
         )
         .unwrap();
@@ -2750,8 +3191,9 @@ mod tests {
             &v4_path,
             "inspect-password",
             &EncryptOptions {
-                config: VaultConfig::default(),
+                config: test_vault_config(),
                 keyfile: Some(keyfile),
+                folder_archive: None,
             },
         )
         .unwrap();
@@ -2765,10 +3207,116 @@ mod tests {
         assert!(!v3.supports_rewrap);
 
         assert_eq!(v4.version, VERSION_V4);
+        assert_eq!(v4.payload_kind, PayloadKind::SingleFile);
         assert_eq!(v4.kdf, "Argon2id");
         assert!(v4.keyfile_required);
         assert!(v4.supports_rewrap);
-        assert_eq!(v4.chunk_size as usize, VaultConfig::default().chunk_size);
+        assert_eq!(v4.chunk_size as usize, test_vault_config().chunk_size);
+    }
+
+    #[test]
+    fn folder_archives_round_trip_back_to_directory() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("project files");
+        let nested = input.join("nested");
+        let empty = nested.join("empty");
+        let encrypted = dir.path().join("project files.zip.plock");
+        let restored = dir.path().join("restored project");
+
+        fs::create_dir_all(&empty).unwrap();
+        fs::write(input.join("hello.txt"), b"hello pillowlock").unwrap();
+        fs::write(nested.join("space name.bin"), b"1234567890").unwrap();
+        let unicode_name = "korean-\u{D14C}\u{C2A4}\u{D2B8}.txt";
+        fs::write(nested.join(unicode_name), b"utf8").unwrap();
+
+        encrypt_file(
+            &input,
+            &encrypted,
+            "folder-password",
+            &EncryptOptions {
+                config: test_vault_config(),
+                keyfile: None,
+                folder_archive: Some(FolderArchiveOptions::default()),
+            },
+        )
+        .unwrap();
+
+        let summary = inspect_vault(&encrypted).unwrap();
+        assert_eq!(summary.payload_kind, PayloadKind::FolderArchive);
+
+        decrypt_file(
+            &encrypted,
+            &restored,
+            "folder-password",
+            &DecryptOptions::default(),
+        )
+        .unwrap();
+
+        assert_eq!(fs::read(restored.join("hello.txt")).unwrap(), b"hello pillowlock");
+        assert_eq!(
+            fs::read(restored.join("nested").join("space name.bin")).unwrap(),
+            b"1234567890"
+        );
+        assert_eq!(
+            fs::read(restored.join("nested").join(unicode_name)).unwrap(),
+            b"utf8"
+        );
+        assert!(restored.join("nested").join("empty").is_dir());
+    }
+
+    #[test]
+    fn folder_archives_reject_wrong_password() {
+        let dir = tempdir().unwrap();
+        let input = dir.path().join("folder");
+        let encrypted = dir.path().join("folder.zip.plock");
+        let restored = dir.path().join("restored");
+
+        fs::create_dir_all(&input).unwrap();
+        fs::write(input.join("a.txt"), b"hello").unwrap();
+
+        encrypt_file(
+            &input,
+            &encrypted,
+            "right-password",
+            &EncryptOptions {
+                config: test_vault_config(),
+                keyfile: None,
+                folder_archive: Some(FolderArchiveOptions::default()),
+            },
+        )
+        .unwrap();
+
+        let err = decrypt_file(
+            &encrypted,
+            &restored,
+            "wrong-password",
+            &DecryptOptions::default(),
+        )
+        .unwrap_err();
+
+        assert!(matches!(err, VaultError::AuthenticationFailed));
+        assert!(!restored.exists());
+    }
+
+    #[test]
+    fn folder_archive_extraction_rejects_path_traversal() {
+        let dir = tempdir().unwrap();
+        let zip_path = dir.path().join("malicious.zip");
+        let output = dir.path().join("restored");
+        let file = File::create(&zip_path).unwrap();
+        let mut zip = ZipWriter::new(file);
+        let options = ZipFileOptions::default().compression_method(ZipCompressionMethod::Stored);
+        zip.add_directory(format!("{FOLDER_ARCHIVE_MANIFEST_DIR}/"), options)
+            .unwrap();
+        zip.start_file(FOLDER_ARCHIVE_MANIFEST_PATH, options).unwrap();
+        zip.write_all(br#"{"version":1,"root_name":"folder"}"#).unwrap();
+        zip.start_file("../escape.txt", options).unwrap();
+        zip.write_all(b"bad").unwrap();
+        zip.finish().unwrap();
+
+        let err = extract_folder_archive(&zip_path, &output, None).unwrap_err();
+        assert!(matches!(err, VaultError::Archive(_)));
+        assert!(!output.exists());
     }
 
     #[test]
@@ -2788,8 +3336,9 @@ mod tests {
             &encrypted,
             "verify-password",
             &EncryptOptions {
-                config: VaultConfig::default(),
+                config: test_vault_config(),
                 keyfile: Some(keyfile.clone()),
+                folder_archive: None,
             },
         )
         .unwrap();
@@ -2822,8 +3371,9 @@ mod tests {
             &encrypted,
             "old-password",
             &EncryptOptions {
-                config: VaultConfig::default(),
+                config: test_vault_config(),
                 keyfile: Some(old_keyfile.clone()),
+                folder_archive: None,
             },
         )
         .unwrap();
@@ -2874,7 +3424,7 @@ mod tests {
             &input,
             &legacy,
             "legacy-password",
-            &EncryptOptions::default(),
+            &test_encrypt_options(),
         )
         .unwrap();
 
